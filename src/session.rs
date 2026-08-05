@@ -160,9 +160,25 @@ async fn load_structure(url: &str) -> Result<Document> {
     Ok(parse_html(&fetched.url, &fetched.body, fetched.fetch_ms))
 }
 
-/// Thin page ⇒ likely JS shell or empty main.
+/// Thin page ⇒ likely JS shell or empty main (not merely a short article).
 pub fn is_thin(doc: &Document) -> bool {
-    doc.text_len() < 280 && doc.links.len() < 5
+    if doc.blocks.is_empty() {
+        return true;
+    }
+    let has_prose = doc.blocks.iter().any(|b| {
+        matches!(
+            b,
+            crate::model::Block::Paragraph { .. }
+                | crate::model::Block::ListItem { .. }
+                | crate::model::Block::Heading { .. }
+                | crate::model::Block::Pre { .. }
+        )
+    });
+    // Short but real documents (example.com) are fine — don't escalate.
+    if has_prose && doc.text_len() >= 40 {
+        return false;
+    }
+    doc.text_len() < 40 && doc.links.len() < 3
 }
 
 fn extract_via_chrome_standalone(url: &str) -> Result<Document> {
