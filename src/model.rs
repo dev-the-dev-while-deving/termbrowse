@@ -79,4 +79,23 @@ impl Document {
             .and_then(|base| base.join(href).ok())
             .or_else(|| Url::parse(href).ok())
     }
+
+    /// Rough content weight for thin-page detection / UI.
+    pub fn text_len(&self) -> usize {
+        self.blocks
+            .iter()
+            .map(|b| match b {
+                Block::Heading { text, .. } | Block::Pre { text } => text.chars().count(),
+                Block::Paragraph { spans }
+                | Block::ListItem { spans }
+                | Block::Quote { spans } => spans
+                    .iter()
+                    .map(|s| match s {
+                        Span::Text { text } | Span::Link { text, .. } => text.chars().count(),
+                    })
+                    .sum(),
+                Block::Hr | Block::Spacer => 0,
+            })
+            .sum()
+    }
 }

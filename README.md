@@ -1,59 +1,74 @@
 # termbrowse
 
-Terminal browser. Capture is **720p (1280×720)**. Display prefers **Kitty graphics** (real pixels).
+**Interactive web sessions for the terminal** — not a scraper dump, not Chrome-in-a-box.
 
-| Mode | Flag | What it does |
-|------|------|----------------|
-| **full** (default) | — | Chrome @ 720p → Kitty/iTerm/Sixel graphics (real pixels). CRT halfblocks if no protocol. |
-| **lite** | `--lite` | HTML-only document browser (no JS). |
+Structure-first browsing for developers and people who live in the shell. Performance over pixels. Same document model for humans and agents.
 
-## Resolution model
-
-| Layer | Size / path |
-|-------|-------------|
-| Chrome viewport | **1280×720** (true 720p) |
-| **In Kitty** | Graphics protocol — real pixels scaled to the pane |
-| Fallback TTY | CRT half-blocks + pan |
-
-### Run inside Kitty (recommended)
-
-```bash
-open -a kitty
-# then:
-cd /Users/devarsheejmude/Projects/trial
-./target/release/termbrowse "https://www.youtube.com/results?search_query=cats"
+```
+URL → structure (HTML → blocks + link refs)
+        ↓ if thin JS shell
+      escalate (Chrome extract → same blocks)
+        ↓
+      session TUI  ·  agent JSON snapshot
 ```
 
-Title bar should say `720p/Kitty graphics`. If it says `CRT halfblocks`, you’re not in Kitty.
+## Position
+
+| | Scrapers | termbrowse | Full browser |
+|--|----------|------------|--------------|
+| Model | One-shot extract | **Live session** | GUI / pixels |
+| Interaction | None | links, history, reload | Everything |
+| Speed | Fast | **Fast by default** | Heavy |
+| Output | Data | **UI + data** | Screen |
+
+**Promise:** Browse the web where you already work — navigate for real, stay fast, zero guilt about not looking like Chrome.
 
 ## Quick start
 
 ```bash
-# CRT green (default phosphor)
-cargo run --release -- "https://www.youtube.com/results?search_query=cats"
+cargo run --release -- https://example.com
+cargo run --release -- https://doc.rust-lang.org/book/
 
-# Other phosphors: color | green | amber | mono
-cargo run --release -- --phosphor amber "https://example.com"
+# Never use Chrome (structure only)
+cargo run --release -- --structure-only https://example.com
 
-# Lite HTML-only
-cargo run --release -- --lite https://example.com
+# Agent snapshot (stderr: source=Structure|Escalated)
+cargo run --release -- snapshot https://example.com
+
+# Legacy pixel paint (Kitty/CRT) — optional, not the product default
+cargo run --release -- --pixels https://example.com
 ```
 
-### Keys (full / CRT mode)
+### Keys
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Scroll real page (re-scan) |
-| `s` | Rescan current frame line-by-line |
-| `f` | Skip scan — show full frame now |
-| `c` | Cycle phosphor (color → green → amber → mono) |
-| `l` | Links panel |
-| `Enter` | Open selected link |
+| `j` / `k` | Scroll |
+| `Tab` / `n` | Next link |
+| `Enter` | Follow link |
+| `[` / `]` | History back / forward |
+| `o` or `:` | Open URL |
 | `r` | Reload |
 | `q` | Quit |
 
-Requires **Google Chrome**.
+Title bar shows **structure** (fast path) or **escalated** (Chrome extract).
+
+## Architecture
+
+| Module | Role |
+|--------|------|
+| `session` | History + load path (structure → escalate) |
+| `parse` / `layout` | HTML → blocks → terminal cells |
+| `theme` / `tui_session` | Grok-density UI (accent rails, magenta) |
+| `chrome` | Optional extract only — not the face |
+| `snapshot` | Agent JSON of the same Document |
+
+## Compatibility (v0)
+
+**In:** docs, blogs, marketing pages, many static/dev sites.  
+**Escalate:** empty JS shells → structured text + links (still not pixel YouTube).  
+**Out:** pixel-perfect GUI web as the default experience.
 
 ## License
 
-MIT (or whatever you prefer later).
+MIT

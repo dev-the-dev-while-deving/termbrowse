@@ -1,5 +1,5 @@
-//! Full-page backend: real Chrome (headless) so JS sites like YouTube actually render.
-//! Capture is fixed at **720p** (1280×720). Terminal pans a 1:1 CRT raster of that buffer.
+//! Chrome backend: optional **extract** for thin JS shells, plus legacy screenshot path.
+//! Product default uses structure-first; Chrome is not the face of the browser.
 
 use anyhow::{Context, Result, bail};
 use headless_chrome::protocol::cdp::Emulation::SetDeviceMetricsOverride;
@@ -9,7 +9,8 @@ use serde::Deserialize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::model::{Document, Link, Ref, Timing};
+use crate::model::{Block, Document, Link, Ref, Span, Timing};
+use crate::parse::parse_html;
 
 /// Source capture resolution — true 720p.
 pub const VIEW_W: u32 = 1280;
@@ -135,6 +136,119 @@ impl FullBrowser {
 
     pub fn open_href(&self, href: &str) -> Result<PageFrame> {
         self.open(href)
+    }
+
+    /// Navigate and extract a structured Document (no screenshot).
+    pub fn extract_document(&self, url: &str) -> Result<Document> {
+        let start = Instant::now();
+        self.tab
+            .navigate_to(url)
+            .with_context(|| format!("navigate {url}"))?;
+        self.tab.wait_until_navigated().ok();
+        std::thread::sleep(Duration::from_millis(1200));
+        let _ = self.wait_for_content();
+
+        let final_url = self.tab.get_url();
+        let fetch_ms = start.elapsed().as_millis() as u64;
+
+        let html = self
+            .tab
+            .evaluate("document.documentElement.outerHTML", false)
+            .ok()
+            .and_then(|r| r.value)
+            .and_then(|v| v.as_str().map(|s| s.to_string()));
+
+        if let Some(html) = html {
+            let doc = parse_html(&final_url, &html, fetch_ms);
+            if doc.text_len() >= 280 || doc.links.len() >= 5 {
+                return Ok(doc);
+            }
+        }
+
+        self.document_from_dom(&final_url, fetch_ms)
+    }
+
+    fn document_from_dom(&self, url: &str, fetch_ms: u64) -> Result<Document> {
+        let title = self.tab.get_title().unwrap_or_else(|_| url.to_string());
+
+        let text = self
+            .tab
+            .evaluate(
+                r#"(function(){
+                    const b = document.body;
+                    return b ? (b.innerText || '').trim() : '';
+                })()"#,
+                false,
+            )
+            .ok()
+            .and_then(|r| r.value)
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+
+        let links = self.extract_links().unwrap_or_default();
+        let mut doc_links = Vec::new();
+        for (i, l) in links.into_iter().take(120).enumerate() {
+            doc_links.push(Link {
+                r#ref: Ref((i + 1) as u32),
+                href: l.href,
+                text: if l.text.is_empty() {
+                    format!("link-{}", i + 1)
+                } else {
+                    l.text.chars().take(100).collect()
+                },
+            });
+        }
+
+        let mut blocks = Vec::new();
+        if !title.is_empty() {
+            blocks.push(Block::Heading {
+                level: 1,
+                text: title.clone(),
+            });
+            blocks.push(Block::Spacer);
+        }
+        for para in text.split("\n\n") {
+            let p = para
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if p.is_empty() {
+                continue;
+            }
+            blocks.push(Block::Paragraph {
+                spans: vec![Span::Text { text: p }],
+            });
+            blocks.push(Block::Spacer);
+        }
+        if !doc_links.is_empty() {
+            blocks.push(Block::Heading {
+                level: 2,
+                text: "Links".into(),
+            });
+            blocks.push(Block::Spacer);
+            for l in &doc_links {
+                blocks.push(Block::ListItem {
+                    spans: vec![Span::Link {
+                        r#ref: l.r#ref,
+                        text: l.text.clone(),
+                    }],
+                });
+            }
+        }
+
+        Ok(Document {
+            url: url.to_string(),
+            title,
+            blocks,
+            links: doc_links,
+            timing_ms: Timing {
+                fetch_ms,
+                parse_ms: 0,
+                layout_ms: 0,
+            },
+        })
     }
 
     fn wait_for_content(&self) -> Result<()> {
