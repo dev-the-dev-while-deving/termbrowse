@@ -1,83 +1,66 @@
 # termbrowse
 
-**Interactive web sessions for the terminal** — not a scraper dump, not Chrome-in-a-box.
-
-Structure-first browsing for developers and people who live in the shell. Performance over pixels. Same document model for humans and agents.
+**Custom interactive web for the terminal** — no headless Chrome, no screenshot paint.
 
 ```
-URL → structure (HTML → blocks + link refs)
-        ↓ if thin JS shell
-      escalate (Chrome extract → same blocks)
-        ↓
-      session TUI  ·  agent JSON snapshot
+URL → HTTPS fetch → HTML parse → blocks + forms + links → Grok-density TUI
+                                                      ↘ agent JSON snapshot
 ```
 
-## Position
+A **session** (history, click links, type search), not a one-shot scraper dump and not a graphical browser.
 
-| | Scrapers | termbrowse | Full browser |
-|--|----------|------------|--------------|
-| Model | One-shot extract | **Live session** | GUI / pixels |
-| Interaction | None | links, history, reload | Everything |
-| Speed | Fast | **Fast by default** | Heavy |
-| Output | Data | **UI + data** | Screen |
+## Stack (all custom)
 
-**Promise:** Browse the web where you already work — navigate for real, stay fast, zero guilt about not looking like Chrome.
+| Layer | What it does |
+|-------|----------------|
+| `fetch` | HTTPS only |
+| `parse` | HTML → headings, paragraphs, lists, links, search forms |
+| `layout` | Terminal cell wrap |
+| `session` | History, navigation, load |
+| `theme` / `tui_session` | Grok-style accent rails + **centered search** |
+| `snapshot` | Same document for agents |
+
+**Not used:** Chromium, Playwright, pixel CRT, Kitty image protocol.
 
 ## Quick start
 
 ```bash
 cargo run --release -- https://example.com
 cargo run --release -- https://doc.rust-lang.org/book/
+cargo run --release -- https://html.duckduckgo.com/html/
 
-# Never use Chrome (structure only)
-cargo run --release -- --structure-only https://example.com
-
-# Agent snapshot (stderr: source=Structure|Escalated)
+# Agent
 cargo run --release -- snapshot https://example.com
-
-# Legacy pixel paint (Kitty/CRT) — optional, not the product default
-cargo run --release -- --pixels https://example.com
 ```
 
 ### Keys
 
 | Key | Action |
 |-----|--------|
-| *type* | On Google/search home: type in the **centered search box** |
-| `Enter` | Submit search (or open selected link) |
-| `/` or `i` | Focus search on any page with a form |
-| `Tab` | Leave search → content / next link |
-| `j` / `k` | Scroll results |
-| `[` / `]` | History back / forward |
+| *type* | On search homes: centered search box |
+| `Enter` | Submit search / open link |
+| `/` or `i` | Focus search |
+| `Tab` | Search ↔ content / next link |
+| `j` / `k` | Scroll |
+| `[` / `]` | History |
 | `o` or `:` | Open URL |
-| `r` | Reload |
 | `q` | Quit |
 
-Search homes show a **Grok-style centered prompt**. Enter runs the query; results load as structured content + links.
+## Search & CAPTCHA
 
-**Google CAPTCHA:** Google often blocks terminal/automated clients. termbrowse uses Google basic HTML (`gbv=1`) and **never** opens Google in headless Chrome (that almost always CAPTCHAs). If Google still blocks you, the UI explains it and offers **DuckDuckGo HTML**, which works much more reliably:
+Google often blocks non-browser clients. We use **basic HTML** (`gbv=1`) only — never a real browser engine. If Google still CAPTCHAs your IP, the UI explains it and offers DuckDuckGo HTML:
 
 ```bash
 ./target/release/termbrowse https://html.duckduckgo.com/html/
 ```
 
-Title bar shows **structure** (fast path) or **escalated** (Chrome extract).
+## Position
 
-## Architecture
-
-| Module | Role |
-|--------|------|
-| `session` | History + load path (structure → escalate) |
-| `parse` / `layout` | HTML → blocks → terminal cells |
-| `theme` / `tui_session` | Grok-density UI (accent rails, magenta) |
-| `chrome` | Optional extract only — not the face |
-| `snapshot` | Agent JSON of the same Document |
-
-## Compatibility (v0)
-
-**In:** docs, blogs, marketing pages, many static/dev sites.  
-**Escalate:** empty JS shells → structured text + links (still not pixel YouTube).  
-**Out:** pixel-perfect GUI web as the default experience.
+| | Scrapers | **termbrowse** | Full browser |
+|--|----------|----------------|--------------|
+| Model | One-shot extract | **Live session** | GUI / JS engine |
+| Engine | HTML parse | **Custom structure** | Chromium/WebKit |
+| Speed | Fast | **Fast by default** | Heavy |
 
 ## License
 

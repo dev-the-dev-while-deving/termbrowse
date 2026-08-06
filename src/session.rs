@@ -1,21 +1,18 @@
-//! Session browser: structure-first load, optional Chrome escalate, history stack.
-//!
-//! Same Document model for human TUI and agent snapshot.
+//! Session browser — **custom only**: HTTPS fetch → HTML parse → Document.
+//! No headless Chrome. No pixel paint. Same model for TUI + agents.
 
-use crate::chrome::{self, FullBrowser};
 use crate::fetch::fetch_url;
-use crate::model::Document;
-use crate::parse::parse_html;
+use crate::model::{Block, Document, Span};
+use crate::parse::{self, parse_html};
+use crate::urlutil::ensure_http_url;
 use anyhow::{Context, Result};
 use std::time::Instant;
 
-/// How the page was obtained.
+/// How the page was obtained (always structure in the custom engine).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadSource {
-    /// Plain HTTPS + HTML parse (fast path).
+    /// HTTPS + custom HTML → block model.
     Structure,
-    /// Headless Chrome extract → same structure model (when HTML is a JS shell).
-    Escalated,
 }
 
 #[derive(Debug, Clone)]
@@ -26,23 +23,15 @@ pub struct LoadedPage {
 }
 
 pub struct Session {
-    /// Chronological stack; `cursor` points at current.
     history: Vec<LoadedPage>,
     cursor: usize,
-    /// Allow Chrome escalate when structure is thin.
-    pub escalate: bool,
-    /// Reserved for sticky Chrome (v1 uses one-shot extract).
-    #[allow(dead_code)]
-    browser: Option<FullBrowser>,
 }
 
 impl Session {
-    pub fn new(escalate: bool) -> Self {
+    pub fn new() -> Self {
         Self {
             history: Vec::new(),
             cursor: 0,
-            escalate,
-            browser: None,
         }
     }
 
@@ -76,10 +65,9 @@ impl Session {
         }
     }
 
-    /// Open URL, push history (drops any forward entries).
     pub async fn open(&mut self, url: &str) -> Result<&LoadedPage> {
-        let url = chrome::ensure_http_url(url)?;
-        let page = load_page(&url, self.escalate, &mut self.browser).await?;
+        let url = ensure_http_url(url)?;
+        let page = load_page(&url).await?;
         if self.cursor + 1 < self.history.len() {
             self.history.truncate(self.cursor + 1);
         }
@@ -93,8 +81,7 @@ impl Session {
             .current()
             .map(|p| p.doc.url.clone())
             .context("nothing to reload")?;
-        // Replace current entry rather than push.
-        let page = load_page(&url, self.escalate, &mut self.browser).await?;
+        let page = load_page(&url).await?;
         self.history[self.cursor] = page;
         Ok(self.current().expect("cursor valid"))
     }
@@ -114,70 +101,42 @@ impl Session {
     }
 }
 
-/// Load one page: structure first, escalate if thin.
-pub async fn load_page(
-    url: &str,
-    escalate: bool,
-    browser: &mut Option<FullBrowser>,
-) -> Result<LoadedPage> {
+/// Custom pipeline only: normalize URL → fetch → parse → annotate.
+pub async fn load_page(url: &str) -> Result<LoadedPage> {
     let start = Instant::now();
-    let mut structure = load_structure(url).await?;
-    crate::parse::annotate_if_captcha(&mut structure);
-
-    // Never escalate Google/Bing to headless Chrome — that path almost always CAPTCHAs.
-    let allow_chrome = escalate && !is_bot_hostile_host(url);
-    let needs_escalate = is_thin(&structure) || is_sparse_serp(&structure);
-
-    if !needs_escalate || !allow_chrome {
-        let total_ms = start.elapsed().as_millis() as u64;
-        return Ok(LoadedPage {
-            doc: structure,
-            source: LoadSource::Structure,
-            total_ms,
-        });
-    }
-
-    // Escalate: Chrome extract for thin JS shells (not search engines).
-    let url_owned = url.to_string();
-    let mut escalated = tokio::task::spawn_blocking(move || extract_via_chrome_standalone(&url_owned))
-        .await
-        .context("escalate task")??;
-
-    let _ = browser;
-    crate::parse::annotate_if_captcha(&mut escalated);
+    let mut doc = load_structure(url).await?;
+    parse::annotate_if_captcha(&mut doc);
+    annotate_if_sparse_js(&mut doc);
 
     let total_ms = start.elapsed().as_millis() as u64;
-    escalated.timing_ms.fetch_ms = total_ms;
     Ok(LoadedPage {
-        doc: escalated,
-        source: LoadSource::Escalated,
+        doc,
+        source: LoadSource::Structure,
         total_ms,
     })
 }
 
 async fn load_structure(url: &str) -> Result<Document> {
-    // Prefer Google basic HTML when user opens a full Google search URL without gbv.
     let url = normalize_search_url(url);
     let fetched = fetch_url(&url).await?;
     let body_l = fetched.body.to_ascii_lowercase();
     let mut doc = parse_html(&fetched.url, &fetched.body, fetched.fetch_ms);
-    crate::parse::attach_known_forms(&mut doc);
+    parse::attach_known_forms(&mut doc);
 
-    // Soft/hard bot walls often return HTTP 200 with challenge HTML.
     let blocked = body_l.contains("captcha")
         || body_l.contains("unusual traffic")
         || body_l.contains("trouble accessing google")
         || body_l.contains("bots use duckduckgo")
         || body_l.contains("our systems have detected")
+        || body_l.contains("complete the following challenge")
         || fetched.url.to_ascii_lowercase().contains("/sorry/");
     if blocked {
         doc.title = "CAPTCHA".into();
     }
-    crate::parse::annotate_if_captcha(&mut doc);
     Ok(doc)
 }
 
-/// Force Google results onto basic HTML (`gbv=1`) so we don't need Chrome.
+/// Google basic HTML when searching (no browser engine required).
 fn normalize_search_url(url: &str) -> String {
     let Ok(mut u) = url::Url::parse(url) else {
         return url.to_string();
@@ -192,53 +151,89 @@ fn normalize_search_url(url: &str) -> String {
         if !pairs.iter().any(|(k, _)| k == "gbv") {
             pairs.push(("gbv".into(), "1".into()));
         }
-        u.query_pairs_mut().clear();
-        for (k, v) in &pairs {
-            u.query_pairs_mut().append_pair(k, v);
+        {
+            let mut ser = u.query_pairs_mut();
+            ser.clear();
+            for (k, v) in &pairs {
+                ser.append_pair(k, v);
+            }
         }
         return u.to_string();
     }
     url.to_string()
 }
 
-/// Hosts where headless Chrome triggers CAPTCHA / bot walls.
-fn is_bot_hostile_host(url: &str) -> bool {
-    let u = url.to_ascii_lowercase();
-    u.contains("google.") || u.contains("bing.") || u.contains("recaptcha")
+/// JS-heavy shell with almost no HTML content — explain, don't launch Chrome.
+fn annotate_if_sparse_js(doc: &mut Document) {
+    if doc.looks_like_captcha() {
+        return;
+    }
+    if !is_thin(doc) {
+        return;
+    }
+    // Keep forms (search home) — empty Google shell with a search form is fine.
+    if doc.primary_search().is_some() && doc.is_search_home() {
+        return;
+    }
+    if doc.text_len() >= 40 || doc.links.len() >= 5 {
+        return;
+    }
+
+    let url = doc.url.clone();
+    doc.blocks = vec![
+        Block::Heading {
+            level: 1,
+            text: "Sparse page (custom HTML engine)".into(),
+        },
+        Block::Spacer,
+        Block::Paragraph {
+            spans: vec![Span::Text {
+                text: "This site ships almost no content in static HTML (JS app shell). \
+termbrowse is a custom structure browser — it does not run a browser engine."
+                    .into(),
+            }],
+        },
+        Block::Spacer,
+        Block::Paragraph {
+            spans: vec![Span::Text {
+                text: "Works great: docs, blogs, HTML search (DuckDuckGo HTML, Google gbv=1), most marketing pages."
+                    .into(),
+            }],
+        },
+        Block::ListItem {
+            spans: vec![Span::Text {
+                text: "Try: https://html.duckduckgo.com/html/".into(),
+            }],
+        },
+        Block::ListItem {
+            spans: vec![Span::Text {
+                text: "Try: https://doc.rust-lang.org/book/".into(),
+            }],
+        },
+        Block::Spacer,
+        Block::Paragraph {
+            spans: vec![Span::Text {
+                text: format!("URL: {url}"),
+            }],
+        },
+    ];
 }
 
-/// Thin page ⇒ likely JS shell or empty main (not merely a short article).
-pub fn is_thin(doc: &Document) -> bool {
+fn is_thin(doc: &Document) -> bool {
     if doc.blocks.is_empty() {
         return true;
     }
     let has_prose = doc.blocks.iter().any(|b| {
         matches!(
             b,
-            crate::model::Block::Paragraph { .. }
-                | crate::model::Block::ListItem { .. }
-                | crate::model::Block::Heading { .. }
-                | crate::model::Block::Pre { .. }
+            Block::Paragraph { .. }
+                | Block::ListItem { .. }
+                | Block::Heading { .. }
+                | Block::Pre { .. }
         )
     });
-    // Short but real documents (example.com) are fine — don't escalate.
     if has_prose && doc.text_len() >= 40 {
         return false;
     }
     doc.text_len() < 40 && doc.links.len() < 3
-}
-
-/// Search engine results with almost no links in static HTML → need Chrome extract.
-fn is_sparse_serp(doc: &Document) -> bool {
-    let u = doc.url.to_ascii_lowercase();
-    let looks_like_serp = u.contains("google.") && u.contains("/search")
-        || u.contains("bing.com/search")
-        || (u.contains("duckduckgo.") && u.contains("q="))
-        || (u.contains("youtube.") && u.contains("search_query"));
-    looks_like_serp && doc.links.len() < 12
-}
-
-fn extract_via_chrome_standalone(url: &str) -> Result<Document> {
-    let browser = FullBrowser::launch()?;
-    browser.extract_document(url)
 }

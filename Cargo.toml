@@ -1,18 +1,15 @@
 [package]
 name = "termbrowse"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
+description = "Custom interactive terminal web session — structure browser, no Chrome"
+license = "MIT"
 
 [dependencies]
 anyhow = "1.0.104"
-base64 = "0.23.1"
 clap = { version = "4.6.5", features = ["derive"] }
 crossterm = "0.29.0"
-headless_chrome = "1.0.22"
-image = "0.25.10"
 ratatui = "0.30.2"
-# No chafa: pure halfblocks fallback + kitty/sixel/iterm protocols
-ratatui-image = { version = "11.0.6", default-features = false, features = ["image-defaults", "crossterm"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "gzip", "brotli", "deflate"] }
 scraper = "0.27.0"
 serde = { version = "1.0.229", features = ["derive"] }

@@ -3,7 +3,7 @@
 
 use crate::layout::{self, Layout as DocLayout, Segment, Style as LayStyle};
 use crate::model::{Document, Ref};
-use crate::session::{LoadSource, Session};
+use crate::session::Session;
 use crate::theme::Theme;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -37,8 +37,8 @@ pub struct App {
 }
 
 impl App {
-    pub async fn open(url: &str, escalate: bool) -> Result<Self> {
-        let mut session = Session::new(escalate);
+    pub async fn open(url: &str) -> Result<Self> {
+        let mut session = Session::new();
         let page = session.open(url).await?;
         let theme = Theme::groknight();
         let status = status_for(page);
@@ -177,30 +177,27 @@ impl App {
 }
 
 fn status_for(page: &crate::session::LoadedPage) -> String {
-    let src = match page.source {
-        LoadSource::Structure => "structure",
-        LoadSource::Escalated => "escalated",
-    };
+    let _ = page.source;
     let search = if page.doc.primary_search().is_some() {
         " · / search"
     } else {
         ""
     };
     format!(
-        "{src} · {}ms · {} links{search} · [ ] history · tab links · q quit",
+        "custom · {}ms · {} links{search} · [ ] history · tab links · q quit",
         page.total_ms,
         page.doc.links.len()
     )
 }
 
-pub async fn run(url: &str, escalate: bool) -> Result<()> {
+pub async fn run(url: &str) -> Result<()> {
     let mut terminal = ratatui::init();
     let size = terminal.size().unwrap_or(Size {
         width: 100,
         height: 30,
     });
 
-    let mut app = match App::open(url, escalate).await {
+    let mut app = match App::open(url).await {
         Ok(mut a) => {
             a.relayout(size.width);
             a
@@ -410,10 +407,6 @@ fn draw(frame: &mut Frame, app: &App) {
         .split(area);
 
     let page = app.session.current().unwrap();
-    let src = match page.source {
-        LoadSource::Structure => "structure",
-        LoadSource::Escalated => "escalated",
-    };
     let back = if app.session.can_back() { "◀" } else { " " };
     let fwd = if app.session.can_forward() { "▶" } else { " " };
     let title = Line::from(vec![
@@ -428,7 +421,7 @@ fn draw(frame: &mut Frame, app: &App) {
             Style::new().bg(th.bg_panel).fg(th.text_dim),
         ),
         Span::styled(
-            format!(" {src} "),
+            " custom ",
             Style::new().bg(th.bg_panel).fg(th.success),
         ),
     ]);
