@@ -204,11 +204,13 @@ termbrowse is a custom structure browser — it does not run a browser engine."
             spans: vec![Span::Text {
                 text: "Try: https://html.duckduckgo.com/html/".into(),
             }],
+            index: 0,
         },
         Block::ListItem {
             spans: vec![Span::Text {
                 text: "Try: https://doc.rust-lang.org/book/".into(),
             }],
+            index: 0,
         },
         Block::Spacer,
         Block::Paragraph {

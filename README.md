@@ -14,13 +14,31 @@ A **session** (history, click links, type search), not a one-shot scraper dump a
 | Layer | What it does |
 |-------|----------------|
 | `fetch` | HTTPS only |
-| `parse` | HTML → headings, paragraphs, lists, links, search forms |
-| `layout` | Terminal cell wrap |
+| `parse` | HTML → **roles** (heading, link, pre, table, frame, image, …) |
+| `layout` | Role → cells; **borders only when the role is bordered** |
 | `session` | History, navigation, load |
-| `theme` / `tui_session` | Grok-style accent rails + **centered search** |
+| `theme` / `tui_session` | Grok-density + centered search |
 | `snapshot` | Same document for agents |
 
 **Not used:** Chromium, Playwright, pixel CRT, Kitty image protocol.
+
+### Minimal role rendering
+
+Not a 1:1 browser paint — same *kinds* of elements, terminal treatment:
+
+| Role | Terminal |
+|------|----------|
+| Heading | `#` / bold |
+| Paragraph | wrapped text |
+| Strong / em / code | bold / italic / green |
+| Link | accent + `[eN]` |
+| List | `•` or `1.` |
+| Quote | `│` bar |
+| Pre / code block | **box border** |
+| Table | unicode grid |
+| Fieldset / card / border | **frame box** |
+| Image | `[ img: alt ]` |
+| HR | `────` |
 
 ## Quick start
 

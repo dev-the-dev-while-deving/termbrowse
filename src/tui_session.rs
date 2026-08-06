@@ -630,16 +630,16 @@ fn draw_content(frame: &mut Frame, app: &App, area: Rect) {
             match seg {
                 Segment::Text { text, style } => {
                     let st = match style {
-                        LayStyle::Heading1 | LayStyle::Heading2 | LayStyle::Heading3 => th.heading(
-                            match style {
-                                LayStyle::Heading1 => 1,
-                                LayStyle::Heading2 => 2,
-                                _ => 3,
-                            },
-                        ),
+                        LayStyle::Heading1 => th.heading(1),
+                        LayStyle::Heading2 => th.heading(2),
+                        LayStyle::Heading3 => th.heading(3),
                         LayStyle::Dim => th.dim(),
                         LayStyle::Quote => th.quote(),
-                        LayStyle::Pre => th.code(),
+                        LayStyle::Pre | LayStyle::Code => th.code(),
+                        LayStyle::Strong => th.strong(),
+                        LayStyle::Em => th.em(),
+                        LayStyle::Border => th.border(),
+                        LayStyle::Image => th.image(),
                         LayStyle::Normal => th.text(),
                     };
                     spans.push(Span::styled(text.clone(), st));

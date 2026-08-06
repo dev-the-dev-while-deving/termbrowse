@@ -1,4 +1,5 @@
-//! Core document model — the browser's truth is a tree + agent refs, not pixels.
+//! Document model: browser-like *roles*, not pixels.
+//! Classification (what is it?) is separate from presentation (how we draw it).
 
 use serde::Serialize;
 use url::Url;
@@ -19,24 +20,17 @@ pub struct Document {
     pub title: String,
     pub blocks: Vec<Block>,
     pub links: Vec<Link>,
-    /// Search / GET forms discovered on the page (Google-style search box).
     #[serde(default)]
     pub forms: Vec<SearchForm>,
-    /// Wall-clock fetch + parse timing (ms).
     pub timing_ms: Timing,
 }
 
-/// A typeable search form (GET). Primary query field + hidden params.
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchForm {
-    /// Absolute or relative form action URL.
     pub action: String,
-    /// Method (only `get` is submitted for now).
     pub method: String,
-    /// Name of the query parameter (e.g. `q`).
     pub query_param: String,
     pub placeholder: String,
-    /// Extra hidden fields to include on submit.
     #[serde(default)]
     pub hidden: Vec<(String, String)>,
 }
@@ -55,6 +49,7 @@ pub struct Link {
     pub text: String,
 }
 
+/// Structural units — how a browser would *treat* the node, not its CSS pixels.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Block {
@@ -67,22 +62,52 @@ pub enum Block {
     },
     ListItem {
         spans: Vec<Span>,
+        /// Ordered list number; 0 = bullet.
+        #[serde(default)]
+        index: u32,
     },
+    /// Code / pre — always drawn with a box border (monospace region).
     Pre {
         text: String,
     },
+    /// Blockquote — left bar (browser quote treatment).
     Quote {
         spans: Vec<Span>,
     },
+    /// Horizontal rule.
     Hr,
-    /// Blank vertical gap (after blocks).
     Spacer,
+    /// Image → minimal placeholder (alt text), not pixels.
+    Image {
+        alt: String,
+    },
+    /// Table — minimal grid with borders.
+    Table {
+        headers: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
+    /// Bordered container (fieldset, figure, card-like boxes, explicit border CSS).
+    /// Children already flattened into `inner` lines of spans.
+    Frame {
+        title: Option<String>,
+        lines: Vec<Vec<Span>>,
+    },
+    /// Inline caption under a figure/table.
+    Caption {
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Span {
     Text { text: String },
+    /// Browser <strong>/<b>
+    Strong { text: String },
+    /// Browser <em>/<i>
+    Em { text: String },
+    /// Browser <code>
+    Code { text: String },
     Link { r#ref: Ref, text: String },
 }
 
@@ -98,17 +123,14 @@ impl Document {
             .or_else(|| Url::parse(href).ok())
     }
 
-    /// Primary search form, if any.
     pub fn primary_search(&self) -> Option<&SearchForm> {
         self.forms.first()
     }
 
-    /// Homepage-style search: centered box UI (Google / DDG / empty search roots).
     pub fn is_search_home(&self) -> bool {
         if self.primary_search().is_none() {
             return false;
         }
-        // CAPTCHA / block pages keep a fallback form — still show center search.
         if self.looks_like_captcha()
             || self.title.contains("CAPTCHA")
             || self.title.contains("Blocked")
@@ -118,7 +140,6 @@ impl Document {
         if let Ok(u) = Url::parse(&self.url) {
             let path = u.path();
             let path_ok = path.is_empty() || path == "/" || path.starts_with("/html");
-            // No results query yet
             let no_q = u
                 .query_pairs()
                 .all(|(k, _)| k != "q" && k != "search_query" && k != "p");
@@ -133,17 +154,14 @@ impl Document {
                 }
             }
         }
-        // Generic: form + sparse body
         self.text_len() < 400 && self.links.len() < 40
     }
 
-    /// Show the big centered Grok-style search surface.
     pub fn wants_centered_search(&self) -> bool {
         self.primary_search().is_some()
             && (self.is_search_home() || self.looks_like_captcha())
     }
 
-    /// Build absolute results URL for a typed query (GET only).
     pub fn search_url(&self, query: &str) -> Option<String> {
         let form = self.primary_search()?;
         if !form.method.eq_ignore_ascii_case("get") {
@@ -153,8 +171,6 @@ impl Document {
         let mut pairs: Vec<(String, String)> = form.hidden.clone();
         pairs.push((form.query_param.clone(), query.to_string()));
 
-        // Google: force basic HTML mode (`gbv=1`). Full Google + automation = CAPTCHA.
-        // Drop session/fingerprint hidden fields that make us look like a broken bot.
         let host = base.host_str().unwrap_or("").to_ascii_lowercase();
         if host.contains("google.") {
             pairs.retain(|(k, _)| {
@@ -180,7 +196,6 @@ impl Document {
         Some(url.to_string())
     }
 
-    /// Page is a bot/CAPTCHA wall (Google "unusual traffic", etc.).
     pub fn looks_like_captcha(&self) -> bool {
         let blob = format!(
             "{} {}",
@@ -188,19 +203,7 @@ impl Document {
             self.blocks
                 .iter()
                 .take(20)
-                .map(|b| match b {
-                    Block::Heading { text, .. } | Block::Pre { text } => text.clone(),
-                    Block::Paragraph { spans }
-                    | Block::ListItem { spans }
-                    | Block::Quote { spans } => spans
-                        .iter()
-                        .map(|s| match s {
-                            Span::Text { text } | Span::Link { text, .. } => text.as_str(),
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    _ => String::new(),
-                })
+                .map(|b| block_plain(b))
                 .collect::<Vec<_>>()
                 .join(" ")
                 .to_ascii_lowercase()
@@ -213,27 +216,55 @@ impl Document {
             || blob.contains("bots use duckduckgo")
             || blob.contains("complete the following challenge")
             || blob.contains("our systems have detected")
-            || blob.contains("enable javascript")
-                && self.url.to_ascii_lowercase().contains("google.")
+            || (blob.contains("enable javascript")
+                && self.url.to_ascii_lowercase().contains("google."))
             || self.url.to_ascii_lowercase().contains("/sorry/")
     }
 
-    /// Rough content weight for thin-page detection / UI.
     pub fn text_len(&self) -> usize {
-        self.blocks
-            .iter()
-            .map(|b| match b {
-                Block::Heading { text, .. } | Block::Pre { text } => text.chars().count(),
-                Block::Paragraph { spans }
-                | Block::ListItem { spans }
-                | Block::Quote { spans } => spans
-                    .iter()
-                    .map(|s| match s {
-                        Span::Text { text } | Span::Link { text, .. } => text.chars().count(),
-                    })
-                    .sum(),
-                Block::Hr | Block::Spacer => 0,
-            })
-            .sum()
+        self.blocks.iter().map(|b| block_plain(b).chars().count()).sum()
     }
+}
+
+fn block_plain(b: &Block) -> String {
+    match b {
+        Block::Heading { text, .. }
+        | Block::Pre { text }
+        | Block::Caption { text }
+        | Block::Image { alt: text } => text.clone(),
+        Block::Paragraph { spans } | Block::ListItem { spans, .. } | Block::Quote { spans } => {
+            spans_plain(spans)
+        }
+        Block::Frame { title, lines } => {
+            let mut s = title.clone().unwrap_or_default();
+            for line in lines {
+                s.push(' ');
+                s.push_str(&spans_plain(line));
+            }
+            s
+        }
+        Block::Table { headers, rows } => {
+            let mut s = headers.join(" ");
+            for r in rows {
+                s.push(' ');
+                s.push_str(&r.join(" "));
+            }
+            s
+        }
+        Block::Hr | Block::Spacer => String::new(),
+    }
+}
+
+fn spans_plain(spans: &[Span]) -> String {
+    spans
+        .iter()
+        .map(|s| match s {
+            Span::Text { text }
+            | Span::Strong { text }
+            | Span::Em { text }
+            | Span::Code { text }
+            | Span::Link { text, .. } => text.as_str(),
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }

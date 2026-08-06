@@ -291,17 +291,20 @@ and show a CAPTCHA. termbrowse cannot solve those in the TUI."
             spans: vec![Span::Text {
                 text: "DuckDuckGo HTML — try o then html.duckduckgo.com".into(),
             }],
+            index: 0,
         },
         Block::ListItem {
             spans: vec![Span::Text {
                 text: "Google basic HTML (gbv=1) — already used when possible; still may block some IPs"
                     .into(),
             }],
+            index: 0,
         },
         Block::ListItem {
             spans: vec![Span::Text {
                 text: "Docs / blogs / most non-search sites — structure path is fine".into(),
             }],
+            index: 0,
         },
         Block::Spacer,
         Block::Paragraph {
@@ -336,7 +339,39 @@ fn walk_element(
 
     // Landmark / non-content chrome often living in body.
     if matches!(name, "nav" | "footer" | "aside") && list_depth == 0 {
-        // Still allow a short pass for nav links? Skip for cleaner reader v0.
+        return;
+    }
+
+    // Bordered containers: fieldset, figure, or style/class hints of a box.
+    if matches!(name, "fieldset" | "figure") || looks_bordered(el) {
+        let title = if name == "fieldset" {
+            el.select(&Selector::parse("legend").unwrap())
+                .next()
+                .map(|l| normalize_ws(&plain_text(&l)))
+                .filter(|s| !s.is_empty())
+        } else if name == "figure" {
+            el.select(&Selector::parse("figcaption").unwrap())
+                .next()
+                .map(|l| normalize_ws(&plain_text(&l)))
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+        let mut inner_blocks = Vec::new();
+        for child in el.children() {
+            if let Some(child_el) = scraper::ElementRef::wrap(child) {
+                let cn = child_el.value().name();
+                if cn == "legend" || cn == "figcaption" {
+                    continue;
+                }
+                walk_element(&child_el, &mut inner_blocks, links, next_ref, list_depth);
+            }
+        }
+        let lines = blocks_to_frame_lines(&inner_blocks);
+        if !lines.is_empty() || title.is_some() {
+            blocks.push(Block::Frame { title, lines });
+            blocks.push(Block::Spacer);
+        }
         return;
     }
 
@@ -359,7 +394,7 @@ fn walk_element(
         "li" => {
             let spans = collect_spans(el, links, next_ref);
             if !spans_empty(&spans) {
-                blocks.push(Block::ListItem { spans });
+                blocks.push(Block::ListItem { spans, index: 0 });
             }
         }
         "pre" => {
@@ -385,9 +420,24 @@ fn walk_element(
         "br" => {
             blocks.push(Block::Spacer);
         }
+        "img" => {
+            let alt = el
+                .value()
+                .attr("alt")
+                .or_else(|| el.value().attr("title"))
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            blocks.push(Block::Image { alt });
+            blocks.push(Block::Spacer);
+        }
+        "table" => {
+            if let Some(t) = parse_table(el) {
+                blocks.push(t);
+                blocks.push(Block::Spacer);
+            }
+        }
         "a" => {
-            // Standalone link block if direct child of flow container handled via spans.
-            // When walk hits <a> as a block-level-ish node under body/div, treat as paragraph.
             if is_blockish_parent(el) {
                 let spans = collect_spans(el, links, next_ref);
                 if !spans_empty(&spans) {
@@ -402,7 +452,7 @@ fn walk_element(
                 }
             }
         }
-        "ul" | "ol" => {
+        "ul" => {
             for child in el.children() {
                 if let Some(child_el) = scraper::ElementRef::wrap(child) {
                     walk_element(&child_el, blocks, links, next_ref, list_depth.saturating_add(1));
@@ -410,16 +460,44 @@ fn walk_element(
             }
             blocks.push(Block::Spacer);
         }
-        "div" | "section" | "main" | "article" | "body" | "span" | "header" | "figure"
-        | "figcaption" | "td" | "th" | "tr" | "table" | "tbody" | "thead" | "dl" | "dt"
-        | "dd" | "form" | "label" | "button" | "details" | "summary" | "center" | "font" => {
+        "ol" => {
+            let mut i = 1u32;
+            for child in el.children() {
+                if let Some(child_el) = scraper::ElementRef::wrap(child) {
+                    if child_el.value().name() == "li" {
+                        let spans = collect_spans(&child_el, links, next_ref);
+                        if !spans_empty(&spans) {
+                            blocks.push(Block::ListItem { spans, index: i });
+                            i += 1;
+                        }
+                    } else {
+                        walk_element(
+                            &child_el,
+                            blocks,
+                            links,
+                            next_ref,
+                            list_depth.saturating_add(1),
+                        );
+                    }
+                }
+            }
+            blocks.push(Block::Spacer);
+        }
+        "figcaption" => {
+            let text = normalize_ws(&plain_text(el));
+            if !text.is_empty() {
+                blocks.push(Block::Caption { text });
+            }
+        }
+        "div" | "section" | "main" | "article" | "body" | "span" | "header" | "td" | "th"
+        | "tr" | "tbody" | "thead" | "dl" | "dt" | "dd" | "form" | "label" | "button"
+        | "details" | "summary" | "center" | "font" => {
             for child in el.children() {
                 if let Some(child_el) = scraper::ElementRef::wrap(child) {
                     walk_element(&child_el, blocks, links, next_ref, list_depth);
                 } else if let Node::Text(t) = child.value() {
                     let text = normalize_ws(t);
                     if !text.is_empty() && is_blockish_parent(el) {
-                        // Loose text under div.
                         blocks.push(Block::Paragraph {
                             spans: vec![Span::Text { text }],
                         });
@@ -436,6 +514,114 @@ fn walk_element(
             }
         }
     }
+}
+
+/// Browser would draw a box (minimal CSS/class heuristic — not full CSS).
+fn looks_bordered(el: &scraper::ElementRef<'_>) -> bool {
+    let style = el.value().attr("style").unwrap_or("").to_ascii_lowercase();
+    if style.contains("border") && !style.contains("border:none") && !style.contains("border: none")
+    {
+        return true;
+    }
+    let class = el.value().attr("class").unwrap_or("").to_ascii_lowercase();
+    class.split_whitespace().any(|c| {
+        matches!(
+            c,
+            "border"
+                | "bordered"
+                | "card"
+                | "box"
+                | "panel"
+                | "well"
+                | "callout"
+                | "alert"
+                | "message"
+                | "modal"
+                | "dialog"
+        ) || c.contains("card")
+            || c.contains("panel")
+            || c.ends_with("-box")
+    })
+}
+
+fn parse_table(el: &scraper::ElementRef<'_>) -> Option<Block> {
+    let mut headers = Vec::new();
+    let mut rows = Vec::new();
+
+    for th in el.select(&Selector::parse("thead th, tr th").unwrap()) {
+        let t = normalize_ws(&plain_text(&th));
+        if !t.is_empty() {
+            headers.push(t);
+        }
+    }
+    // de-dupe if we double-counted
+    if headers.len() > 12 {
+        headers.truncate(12);
+    }
+
+    for tr in el.select(&Selector::parse("tr").unwrap()) {
+        let cells: Vec<String> = tr
+            .select(&Selector::parse("td").unwrap())
+            .map(|td| normalize_ws(&plain_text(&td)))
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !cells.is_empty() {
+            rows.push(cells);
+        }
+    }
+
+    if headers.is_empty() && rows.is_empty() {
+        return None;
+    }
+    // If no headers, promote first row
+    if headers.is_empty() && !rows.is_empty() {
+        headers = rows.remove(0);
+    }
+    Some(Block::Table { headers, rows })
+}
+
+fn blocks_to_frame_lines(blocks: &[Block]) -> Vec<Vec<Span>> {
+    let mut lines = Vec::new();
+    for b in blocks {
+        match b {
+            Block::Heading { text, .. } => lines.push(vec![Span::Strong {
+                text: text.clone(),
+            }]),
+            Block::Paragraph { spans } | Block::ListItem { spans, .. } | Block::Quote { spans } => {
+                if !spans_empty(spans) {
+                    lines.push(spans.clone());
+                }
+            }
+            Block::Pre { text } => {
+                for line in text.lines() {
+                    lines.push(vec![Span::Code {
+                        text: line.to_string(),
+                    }]);
+                }
+            }
+            Block::Image { alt } => lines.push(vec![Span::Em {
+                text: if alt.is_empty() {
+                    "[image]".into()
+                } else {
+                    format!("[img: {alt}]")
+                },
+            }]),
+            Block::Caption { text } => lines.push(vec![Span::Em {
+                text: text.clone(),
+            }]),
+            Block::Hr => lines.push(vec![Span::Text {
+                text: "───".into(),
+            }]),
+            Block::Spacer => {}
+            Block::Table { .. } | Block::Frame { .. } => {
+                // nested tables/frames: flatten to summary
+                lines.push(vec![Span::Em {
+                    text: "[…]".into(),
+                }]);
+            }
+        }
+    }
+    lines
 }
 
 fn is_blockish_parent(el: &scraper::ElementRef<'_>) -> bool {
@@ -503,6 +689,33 @@ fn collect_spans_into(
         return;
     }
 
+    if matches!(name, "strong" | "b") {
+        let t = normalize_ws(&plain_text(el));
+        if !t.is_empty() {
+            out.push(Span::Strong { text: t });
+        }
+        return;
+    }
+    if matches!(name, "em" | "i") {
+        let t = normalize_ws(&plain_text(el));
+        if !t.is_empty() {
+            out.push(Span::Em { text: t });
+        }
+        return;
+    }
+    if name == "code" && el.parent().map(|p| {
+        matches!(p.value(), Node::Element(e) if e.name() == "pre")
+    }) != Some(true)
+    {
+        let t = el.text().collect::<String>();
+        if !t.is_empty() {
+            out.push(Span::Code {
+                text: t.trim().to_string(),
+            });
+        }
+        return;
+    }
+
     if name == "br" {
         out.push(Span::Text {
             text: " ".to_string(),
@@ -514,7 +727,6 @@ fn collect_spans_into(
         match child.value() {
             Node::Text(t) => {
                 let raw = t.to_string();
-                // Preserve single spaces; collapse later via normalize on merge.
                 if !raw.is_empty() {
                     out.push(Span::Text { text: raw });
                 }
@@ -539,8 +751,11 @@ fn normalize_ws(s: &str) -> String {
 
 fn spans_empty(spans: &[Span]) -> bool {
     spans.iter().all(|s| match s {
-        Span::Text { text } => text.split_whitespace().next().is_none(),
-        Span::Link { text, .. } => text.is_empty(),
+        Span::Text { text }
+        | Span::Strong { text }
+        | Span::Em { text }
+        | Span::Code { text }
+        | Span::Link { text, .. } => text.split_whitespace().next().is_none(),
     })
 }
 
@@ -558,7 +773,6 @@ fn merge_text_spans(spans: Vec<Span>) -> Vec<Span> {
             other => out.push(other),
         }
     }
-    // Normalize whitespace inside text spans but keep structure.
     out.into_iter()
         .filter_map(|s| match s {
             Span::Text { text } => {
@@ -567,6 +781,30 @@ fn merge_text_spans(spans: Vec<Span>) -> Vec<Span> {
                     None
                 } else {
                     Some(Span::Text { text: t })
+                }
+            }
+            Span::Strong { text } => {
+                let t = normalize_ws(&text);
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(Span::Strong { text: t })
+                }
+            }
+            Span::Em { text } => {
+                let t = normalize_ws(&text);
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(Span::Em { text: t })
+                }
+            }
+            Span::Code { text } => {
+                let t = text.trim().to_string();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(Span::Code { text: t })
                 }
             }
             Span::Link { r#ref, text } => {
@@ -635,6 +873,30 @@ mod tests {
         assert!(url.contains("google.com/search"));
         assert!(url.contains("q=rust"));
         assert!(url.contains("gbv=1"), "google search must use basic HTML: {url}");
+    }
+
+    #[test]
+    fn role_borders_table_pre() {
+        let html = r#"
+        <html><body><main>
+          <h1>Doc</h1>
+          <p>Hello <strong>world</strong> and <code>x</code>.</p>
+          <pre>fn main() {}</pre>
+          <table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>
+          <fieldset><legend>Box</legend><p>Inside</p></fieldset>
+          <img alt="logo" src="x.png">
+        </main></body></html>
+        "#;
+        let doc = parse_html("https://example.com/", html, 1);
+        assert!(doc.blocks.iter().any(|b| matches!(b, Block::Pre { .. })));
+        assert!(doc.blocks.iter().any(|b| matches!(b, Block::Table { .. })));
+        assert!(doc.blocks.iter().any(|b| matches!(b, Block::Frame { .. })));
+        assert!(doc.blocks.iter().any(|b| matches!(b, Block::Image { .. })));
+        let has_strong = doc.blocks.iter().any(|b| match b {
+            Block::Paragraph { spans } => spans.iter().any(|s| matches!(s, Span::Strong { .. })),
+            _ => false,
+        });
+        assert!(has_strong);
     }
 
     #[test]

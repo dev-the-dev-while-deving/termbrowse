@@ -111,4 +111,26 @@ impl Theme {
             .bg(self.bg)
             .add_modifier(Modifier::ITALIC)
     }
+
+    pub fn strong(&self) -> Style {
+        Style::new()
+            .fg(self.heading)
+            .bg(self.bg)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn em(&self) -> Style {
+        Style::new()
+            .fg(self.text)
+            .bg(self.bg)
+            .add_modifier(Modifier::ITALIC)
+    }
+
+    pub fn border(&self) -> Style {
+        Style::new().fg(self.border).bg(self.bg)
+    }
+
+    pub fn image(&self) -> Style {
+        Style::new().fg(self.text_dim).bg(self.bg)
+    }
 }
