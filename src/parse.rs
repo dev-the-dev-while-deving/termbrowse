@@ -1,6 +1,6 @@
 //! HTML → document model. No JS. Skip chrome (script/style/svg noise).
 
-use crate::model::{Block, Document, Link, Ref, Span, Timing};
+use crate::model::{Block, Document, Link, Ref, SearchForm, Span, Timing};
 use scraper::{Html, Node, Selector};
 use std::time::Instant;
 
@@ -39,18 +39,207 @@ pub fn parse_html(url: &str, html: &str, fetch_ms: u64) -> Document {
     // Collapse runs of spacers.
     blocks = collapse_spacers(blocks);
 
+    let mut forms = extract_search_forms(&dom, url);
+    // Known search engines: always expose a search box even if HTML hid the form.
+    if forms.is_empty() {
+        if let Some(f) = known_engine_form(url) {
+            forms.push(f);
+        }
+    }
+
     let parse_ms = start.elapsed().as_millis() as u64;
     Document {
         url: url.to_string(),
         title,
         blocks,
         links,
+        forms,
         timing_ms: Timing {
             fetch_ms,
             parse_ms,
             layout_ms: 0,
         },
     }
+}
+
+/// Pull GET search-like forms: input[type=search|text] named q/query/search…
+fn extract_search_forms(dom: &Html, page_url: &str) -> Vec<SearchForm> {
+    let Ok(form_sel) = Selector::parse("form") else {
+        return vec![];
+    };
+    let mut out = Vec::new();
+
+    for form in dom.select(&form_sel) {
+        let method = form
+            .value()
+            .attr("method")
+            .unwrap_or("get")
+            .to_ascii_lowercase();
+        if method != "get" {
+            continue;
+        }
+        let action = form.value().attr("action").unwrap_or("").to_string();
+        let action = if action.is_empty() {
+            page_url.to_string()
+        } else {
+            action
+        };
+
+        let mut query_param: Option<String> = None;
+        let mut placeholder = String::from("Search…");
+        let mut hidden: Vec<(String, String)> = Vec::new();
+
+        // Inputs inside form
+        for input in form.select(&Selector::parse("input").unwrap()) {
+            let name = input.value().attr("name").unwrap_or("").to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let itype = input
+                .value()
+                .attr("type")
+                .unwrap_or("text")
+                .to_ascii_lowercase();
+            let value = input.value().attr("value").unwrap_or("").to_string();
+            let ph = input.value().attr("placeholder").unwrap_or("");
+
+            match itype.as_str() {
+                "hidden" => hidden.push((name, value)),
+                "search" | "text" => {
+                    let is_query = matches!(
+                        name.as_str(),
+                        "q" | "query" | "search" | "search_query" | "p" | "text" | "wd" | "keyword"
+                    ) || itype == "search"
+                        || query_param.is_none();
+                    if is_query && query_param.is_none() {
+                        query_param = Some(name);
+                        if !ph.is_empty() {
+                            placeholder = ph.to_string();
+                        } else if !value.is_empty() {
+                            // keep empty for typing
+                        }
+                    } else if !matches!(itype.as_str(), "submit" | "button" | "image") {
+                        // non-query text fields → hidden-ish defaults
+                        if !value.is_empty() {
+                            hidden.push((name, value));
+                        }
+                    }
+                }
+                "submit" | "button" | "image" | "checkbox" | "radio" => {}
+                _ => {
+                    if !value.is_empty() {
+                        hidden.push((name, value));
+                    }
+                }
+            }
+        }
+
+        // textarea named q etc.
+        if query_param.is_none() {
+            for ta in form.select(&Selector::parse("textarea").unwrap()) {
+                let name = ta.value().attr("name").unwrap_or("");
+                if matches!(name, "q" | "query" | "search") {
+                    query_param = Some(name.to_string());
+                    break;
+                }
+            }
+        }
+
+        let Some(query_param) = query_param else {
+            continue;
+        };
+
+        // Prefer forms that look like site search
+        let score = score_search_form(&action, &query_param, &placeholder);
+        out.push((
+            score,
+            SearchForm {
+                action,
+                method: "get".into(),
+                query_param,
+                placeholder,
+                hidden,
+            },
+        ));
+    }
+
+    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out.into_iter().map(|(_, f)| f).take(3).collect()
+}
+
+fn score_search_form(action: &str, query_param: &str, placeholder: &str) -> i32 {
+    let mut s = 0;
+    let a = action.to_ascii_lowercase();
+    let p = placeholder.to_ascii_lowercase();
+    if query_param == "q" {
+        s += 5;
+    }
+    if a.contains("search") {
+        s += 4;
+    }
+    if p.contains("search") || p.contains("google") {
+        s += 3;
+    }
+    if matches!(query_param, "query" | "search" | "search_query") {
+        s += 3;
+    }
+    s
+}
+
+/// Ensure search engines always get a typeable form.
+pub fn attach_known_forms(doc: &mut Document) {
+    if doc.forms.is_empty() {
+        if let Some(f) = known_engine_form(&doc.url) {
+            doc.forms.push(f);
+        }
+    }
+}
+
+/// Hard-coded engines when markup is minimal / JS-only.
+fn known_engine_form(page_url: &str) -> Option<SearchForm> {
+    let u = page_url.to_ascii_lowercase();
+    let host = url::Url::parse(page_url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+        .unwrap_or_default();
+
+    if host.contains("google.") {
+        return Some(SearchForm {
+            action: "https://www.google.com/search".into(),
+            method: "get".into(),
+            query_param: "q".into(),
+            placeholder: "Search Google…".into(),
+            hidden: vec![],
+        });
+    }
+    if host.contains("duckduckgo.") || u.contains("duckduckgo.com") {
+        return Some(SearchForm {
+            action: "https://duckduckgo.com/".into(),
+            method: "get".into(),
+            query_param: "q".into(),
+            placeholder: "Search DuckDuckGo…".into(),
+            hidden: vec![],
+        });
+    }
+    if host.contains("bing.") {
+        return Some(SearchForm {
+            action: "https://www.bing.com/search".into(),
+            method: "get".into(),
+            query_param: "q".into(),
+            placeholder: "Search Bing…".into(),
+            hidden: vec![],
+        });
+    }
+    if host.contains("youtube.") {
+        return Some(SearchForm {
+            action: "https://www.youtube.com/results".into(),
+            method: "get".into(),
+            query_param: "search_query".into(),
+            placeholder: "Search YouTube…".into(),
+            hidden: vec![],
+        });
+    }
+    None
 }
 
 fn walk_element(
@@ -356,5 +545,32 @@ mod tests {
         assert_eq!(doc.title, "Hello");
         assert!(doc.links.len() >= 2);
         assert!(doc.blocks.iter().any(|b| matches!(b, Block::Heading { level: 1, .. })));
+    }
+
+    #[test]
+    fn google_gets_search_form() {
+        let doc = parse_html("https://www.google.com/", "<html><body></body></html>", 1);
+        assert!(!doc.forms.is_empty());
+        let url = doc.search_url("rust lang").unwrap();
+        assert!(url.contains("google.com/search"));
+        assert!(url.contains("q=rust"));
+    }
+
+    #[test]
+    fn parses_form_with_q() {
+        let html = r#"
+        <html><body>
+          <form action="/search" method="get">
+            <input type="text" name="q" placeholder="Search site">
+            <input type="hidden" name="hl" value="en">
+          </form>
+        </body></html>
+        "#;
+        let doc = parse_html("https://example.com/", html, 1);
+        assert_eq!(doc.forms[0].query_param, "q");
+        assert_eq!(doc.forms[0].placeholder, "Search site");
+        let u = doc.search_url("hello").unwrap();
+        assert!(u.contains("q=hello"));
+        assert!(u.contains("hl=en"));
     }
 }

@@ -11,6 +11,7 @@ pub struct Snapshot {
     pub timing_ms: crate::model::Timing,
     pub links: Vec<crate::model::Link>,
     pub blocks: Vec<crate::model::Block>,
+    pub forms: Vec<crate::model::SearchForm>,
     pub layout: Option<LayoutSummary>,
 }
 
@@ -40,6 +41,7 @@ pub fn snapshot(doc: &Document, layout: Option<&Layout>) -> Snapshot {
         timing_ms: doc.timing_ms.clone(),
         links: doc.links.clone(),
         blocks: doc.blocks.clone(),
+        forms: doc.forms.clone(),
         layout,
     }
 }

@@ -238,17 +238,20 @@ impl FullBrowser {
             }
         }
 
-        Ok(Document {
+        let mut doc = Document {
             url: url.to_string(),
             title,
             blocks,
             links: doc_links,
+            forms: vec![],
             timing_ms: Timing {
                 fetch_ms,
                 parse_ms: 0,
                 layout_ms: 0,
             },
-        })
+        };
+        crate::parse::attach_known_forms(&mut doc);
+        Ok(doc)
     }
 
     fn wait_for_content(&self) -> Result<()> {
@@ -321,13 +324,15 @@ impl FullBrowser {
         }
 
         // Minimal block list so lite snapshot tools still work if reused.
-        let doc = Document {
+        let mut doc = Document {
             url,
             title,
             blocks: vec![],
             links: doc_links,
+            forms: vec![],
             timing_ms: Timing::default(),
         };
+        crate::parse::attach_known_forms(&mut doc);
 
         Ok(PageFrame {
             doc,

@@ -43,13 +43,17 @@ cargo run --release -- --pixels https://example.com
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Scroll |
-| `Tab` / `n` | Next link |
-| `Enter` | Follow link |
+| *type* | On Google/search home: type in the **centered search box** |
+| `Enter` | Submit search (or open selected link) |
+| `/` or `i` | Focus search on any page with a form |
+| `Tab` | Leave search → content / next link |
+| `j` / `k` | Scroll results |
 | `[` / `]` | History back / forward |
 | `o` or `:` | Open URL |
 | `r` | Reload |
 | `q` | Quit |
+
+Search homes (Google, DuckDuckGo, Bing, YouTube) show a **Grok-style centered prompt** in the middle of the screen. Enter runs the query; results load as structured content + links.
 
 Title bar shows **structure** (fast path) or **escalated** (Chrome extract).
 

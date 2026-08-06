@@ -123,7 +123,8 @@ pub async fn load_page(
     let start = Instant::now();
     let structure = load_structure(url).await?;
 
-    if !is_thin(&structure) || !escalate {
+    let needs_escalate = is_thin(&structure) || is_sparse_serp(&structure);
+    if !needs_escalate || !escalate {
         let total_ms = start.elapsed().as_millis() as u64;
         return Ok(LoadedPage {
             doc: structure,
@@ -157,7 +158,9 @@ pub async fn load_page(
 
 async fn load_structure(url: &str) -> Result<Document> {
     let fetched = fetch_url(url).await?;
-    Ok(parse_html(&fetched.url, &fetched.body, fetched.fetch_ms))
+    let mut doc = parse_html(&fetched.url, &fetched.body, fetched.fetch_ms);
+    crate::parse::attach_known_forms(&mut doc);
+    Ok(doc)
 }
 
 /// Thin page ⇒ likely JS shell or empty main (not merely a short article).
@@ -179,6 +182,16 @@ pub fn is_thin(doc: &Document) -> bool {
         return false;
     }
     doc.text_len() < 40 && doc.links.len() < 3
+}
+
+/// Search engine results with almost no links in static HTML → need Chrome extract.
+fn is_sparse_serp(doc: &Document) -> bool {
+    let u = doc.url.to_ascii_lowercase();
+    let looks_like_serp = u.contains("google.") && u.contains("/search")
+        || u.contains("bing.com/search")
+        || (u.contains("duckduckgo.") && u.contains("q="))
+        || (u.contains("youtube.") && u.contains("search_query"));
+    looks_like_serp && doc.links.len() < 12
 }
 
 fn extract_via_chrome_standalone(url: &str) -> Result<Document> {
