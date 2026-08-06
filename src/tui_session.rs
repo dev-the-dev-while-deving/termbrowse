@@ -431,14 +431,19 @@ fn draw(frame: &mut Frame, app: &App) {
     // Fill body background
     frame.render_widget(Block::default().style(th.body_bg()), body);
 
-    let search_home = page.doc.is_search_home()
-        || (app.focus == Focus::Search && page.doc.primary_search().is_some());
+    // Centered Grok-style search whenever we're in Search focus with a form,
+    // or on a search-home / captcha page (default open).
+    let show_centered = app.focus == Focus::Search
+        && page.doc.primary_search().is_some()
+        && (page.doc.wants_centered_search()
+            || page.doc.is_search_home()
+            || app.search_buf.is_empty() && page.doc.links.len() < 15);
 
-    if search_home && app.focus == Focus::Search {
+    if show_centered {
         draw_centered_search(frame, app, body);
     } else {
         draw_content(frame, app, body);
-        // Compact search strip at top of body when form exists and focused
+        // Compact strip when searching from a results page
         if app.focus == Focus::Search && page.doc.primary_search().is_some() {
             draw_top_search_bar(frame, app, body);
         }
@@ -492,7 +497,7 @@ fn draw(frame: &mut Frame, app: &App) {
     );
 }
 
-/// Grok Build–style centered search: title + middle input box + muted hint.
+/// Grok Build–style centered search: brand + middle prompt box (magenta accent).
 fn draw_centered_search(frame: &mut Frame, app: &App, area: Rect) {
     let th = &app.theme;
     let doc = app.doc();
@@ -502,18 +507,22 @@ fn draw_centered_search(frame: &mut Frame, app: &App, area: Rect) {
         .unwrap_or("Search…");
     let brand = brand_label(doc);
 
-    // Vertical center stack: brand, spacer, box (3 rows), hint
-    let box_w = (area.width as usize * 60 / 100).clamp(36, 72) as u16;
-    let box_h: u16 = 3;
-    let total_h = 1 + 1 + box_h + 1 + 1; // brand, pad, box, pad, hint
+    // Fill full body dark (like Grok scrollback empty state)
+    frame.render_widget(Block::default().style(Style::new().bg(th.bg)), area);
+
+    // Stack: brand, pad, prompt box (5 rows tall for Grok-like density), pad, hints
+    let box_w = (area.width as usize * 62 / 100).clamp(40, 78) as u16;
+    let box_h: u16 = 5;
+    let total_h = 2 + 1 + box_h + 2 + 2;
     let top = area.y + area.height.saturating_sub(total_h) / 2;
     let left = area.x + area.width.saturating_sub(box_w) / 2;
 
-    // Brand
-    let brand_w = brand.chars().count() as u16;
+    // Brand (centered, accent)
+    let brand_line = format!("◆  {brand}");
+    let brand_w = brand_line.chars().count() as u16;
     let brand_x = area.x + area.width.saturating_sub(brand_w) / 2;
     frame.render_widget(
-        Paragraph::new(brand).style(
+        Paragraph::new(brand_line).style(
             Style::new()
                 .fg(th.accent)
                 .bg(th.bg)
@@ -522,17 +531,23 @@ fn draw_centered_search(frame: &mut Frame, app: &App, area: Rect) {
         Rect::new(brand_x, top, brand_w.min(area.width), 1),
     );
 
-    // Input box (Grok prompt energy)
-    let box_area = Rect::new(left, top + 2, box_w.min(area.width), box_h);
-    let border_style = Style::new().fg(th.accent).bg(th.bg);
+    // Prompt box — Grok input energy: panel bg, magenta border, left accent title
+    let box_area = Rect::new(left, top + 3, box_w.min(area.width), box_h);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(border_style)
+        .border_style(Style::new().fg(th.accent).bg(th.bg_panel))
         .style(Style::new().bg(th.bg_panel))
-        .title(Span::styled(" search ", Style::new().fg(th.accent).bg(th.bg)));
+        .title(Span::styled(
+            " ▎ search ",
+            Style::new()
+                .fg(th.accent)
+                .bg(th.bg_panel)
+                .add_modifier(Modifier::BOLD),
+        ));
     let inner = block.inner(box_area);
     frame.render_widget(block, box_area);
 
+    // Two-line input area inside the box
     let display = if app.search_buf.is_empty() {
         format!("  {placeholder}")
     } else {
@@ -541,18 +556,36 @@ fn draw_centered_search(frame: &mut Frame, app: &App, area: Rect) {
     let input_style = if app.search_buf.is_empty() {
         Style::new().fg(th.text_dim).bg(th.bg_panel)
     } else {
-        Style::new().fg(th.text).bg(th.bg_panel)
+        Style::new()
+            .fg(th.text)
+            .bg(th.bg_panel)
+            .add_modifier(Modifier::BOLD)
     };
-    frame.render_widget(Paragraph::new(display).style(input_style), inner);
-
-    // Hint under box
-    let hint = "enter to search  ·  tab for page content";
-    let hint_w = hint.len() as u16;
-    let hint_x = area.x + area.width.saturating_sub(hint_w) / 2;
-    frame.render_widget(
-        Paragraph::new(hint).style(Style::new().fg(th.text_dim).bg(th.bg)),
-        Rect::new(hint_x, top + 2 + box_h + 1, hint_w.min(area.width), 1),
+    // Vertical center text in the inner box
+    let inner_mid = Rect::new(
+        inner.x,
+        inner.y + inner.height.saturating_sub(1) / 2,
+        inner.width,
+        1,
     );
+    frame.render_widget(Paragraph::new(display).style(input_style), inner_mid);
+
+    // Hints under box
+    let hint1 = "enter to search";
+    let hint2 = "tab · page content    [ ] · history    q · quit";
+    for (i, hint) in [hint1, hint2].iter().enumerate() {
+        let hint_w = hint.len() as u16;
+        let hint_x = area.x + area.width.saturating_sub(hint_w) / 2;
+        frame.render_widget(
+            Paragraph::new(*hint).style(Style::new().fg(th.text_dim).bg(th.bg)),
+            Rect::new(
+                hint_x,
+                top + 3 + box_h + 1 + i as u16,
+                hint_w.min(area.width),
+                1,
+            ),
+        );
+    }
 }
 
 fn draw_top_search_bar(frame: &mut Frame, app: &App, body: Rect) {

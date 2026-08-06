@@ -108,11 +108,20 @@ impl Document {
         if self.primary_search().is_none() {
             return false;
         }
+        // CAPTCHA / block pages keep a fallback form — still show center search.
+        if self.looks_like_captcha()
+            || self.title.contains("CAPTCHA")
+            || self.title.contains("Blocked")
+        {
+            return true;
+        }
         if let Ok(u) = Url::parse(&self.url) {
             let path = u.path();
-            let path_ok = path.is_empty() || path == "/";
+            let path_ok = path.is_empty() || path == "/" || path.starts_with("/html");
             // No results query yet
-            let no_q = u.query_pairs().all(|(k, _)| k != "q" && k != "search_query");
+            let no_q = u
+                .query_pairs()
+                .all(|(k, _)| k != "q" && k != "search_query" && k != "p");
             if path_ok && no_q {
                 let host = u.host_str().unwrap_or("");
                 if host.contains("google.")
@@ -126,6 +135,12 @@ impl Document {
         }
         // Generic: form + sparse body
         self.text_len() < 400 && self.links.len() < 40
+    }
+
+    /// Show the big centered Grok-style search surface.
+    pub fn wants_centered_search(&self) -> bool {
+        self.primary_search().is_some()
+            && (self.is_search_home() || self.looks_like_captcha())
     }
 
     /// Build absolute results URL for a typed query (GET only).
