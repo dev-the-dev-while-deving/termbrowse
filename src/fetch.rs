@@ -16,18 +16,27 @@ pub struct Fetched {
 }
 
 pub async fn fetch_url(url: &str) -> Result<Fetched> {
+    // Look like a normal browser — custom bot UAs get CAPTCHAs on Google/etc.
     let client = reqwest::Client::builder()
-        .user_agent(concat!(
-            "termbrowse/0.1 (+https://github.com/local/termbrowse; document browser)"
-        ))
+        .user_agent(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+             AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/122.0.0.0 Safari/537.36",
+        )
         .redirect(reqwest::redirect::Policy::limited(10))
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .context("build http client")?;
 
     let start = Instant::now();
+    // Prefer HTML over other types when the server negotiates.
     let response = client
         .get(url)
+        .header(
+            reqwest::header::ACCEPT,
+            "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+        )
+        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
         .send()
         .await
         .with_context(|| format!("request failed: {url}"))?;

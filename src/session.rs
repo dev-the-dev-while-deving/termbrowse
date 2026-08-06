@@ -121,10 +121,14 @@ pub async fn load_page(
     browser: &mut Option<FullBrowser>,
 ) -> Result<LoadedPage> {
     let start = Instant::now();
-    let structure = load_structure(url).await?;
+    let mut structure = load_structure(url).await?;
+    crate::parse::annotate_if_captcha(&mut structure);
 
+    // Never escalate Google/Bing to headless Chrome — that path almost always CAPTCHAs.
+    let allow_chrome = escalate && !is_bot_hostile_host(url);
     let needs_escalate = is_thin(&structure) || is_sparse_serp(&structure);
-    if !needs_escalate || !escalate {
+
+    if !needs_escalate || !allow_chrome {
         let total_ms = start.elapsed().as_millis() as u64;
         return Ok(LoadedPage {
             doc: structure,
@@ -133,34 +137,74 @@ pub async fn load_page(
         });
     }
 
-    // Escalate: Chrome renders JS, we extract structure — we do not paint pixels.
+    // Escalate: Chrome extract for thin JS shells (not search engines).
     let url_owned = url.to_string();
-    let escalated = tokio::task::spawn_blocking(move || {
-        // Local browser for one-shot if caller didn't keep one — but we need mut browser.
-        // Handled below with browser option.
-        extract_via_chrome_standalone(&url_owned)
-    })
-    .await
-    .context("escalate task")??;
+    let mut escalated = tokio::task::spawn_blocking(move || extract_via_chrome_standalone(&url_owned))
+        .await
+        .context("escalate task")??;
 
-    // Prefer reusing browser if we add that later; standalone is fine for v1.
-    let _ = browser; // reserved for sticky Chrome session
+    let _ = browser;
+    crate::parse::annotate_if_captcha(&mut escalated);
 
     let total_ms = start.elapsed().as_millis() as u64;
-    let mut doc = escalated;
-    doc.timing_ms.fetch_ms = total_ms;
+    escalated.timing_ms.fetch_ms = total_ms;
     Ok(LoadedPage {
-        doc,
+        doc: escalated,
         source: LoadSource::Escalated,
         total_ms,
     })
 }
 
 async fn load_structure(url: &str) -> Result<Document> {
-    let fetched = fetch_url(url).await?;
+    // Prefer Google basic HTML when user opens a full Google search URL without gbv.
+    let url = normalize_search_url(url);
+    let fetched = fetch_url(&url).await?;
+    let body_l = fetched.body.to_ascii_lowercase();
     let mut doc = parse_html(&fetched.url, &fetched.body, fetched.fetch_ms);
     crate::parse::attach_known_forms(&mut doc);
+
+    // Soft/hard bot walls often return HTTP 200 with challenge HTML.
+    let blocked = body_l.contains("captcha")
+        || body_l.contains("unusual traffic")
+        || body_l.contains("trouble accessing google")
+        || body_l.contains("bots use duckduckgo")
+        || body_l.contains("our systems have detected")
+        || fetched.url.to_ascii_lowercase().contains("/sorry/");
+    if blocked {
+        doc.title = "CAPTCHA".into();
+    }
+    crate::parse::annotate_if_captcha(&mut doc);
     Ok(doc)
+}
+
+/// Force Google results onto basic HTML (`gbv=1`) so we don't need Chrome.
+fn normalize_search_url(url: &str) -> String {
+    let Ok(mut u) = url::Url::parse(url) else {
+        return url.to_string();
+    };
+    let host = u.host_str().unwrap_or("").to_ascii_lowercase();
+    if host.contains("google.") && u.path().contains("search") {
+        let mut pairs: Vec<(String, String)> = u
+            .query_pairs()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        pairs.retain(|(k, _)| k == "q" || k == "hl" || k == "gbv" || k == "start" || k == "tbm");
+        if !pairs.iter().any(|(k, _)| k == "gbv") {
+            pairs.push(("gbv".into(), "1".into()));
+        }
+        u.query_pairs_mut().clear();
+        for (k, v) in &pairs {
+            u.query_pairs_mut().append_pair(k, v);
+        }
+        return u.to_string();
+    }
+    url.to_string()
+}
+
+/// Hosts where headless Chrome triggers CAPTCHA / bot walls.
+fn is_bot_hostile_host(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    u.contains("google.") || u.contains("bing.") || u.contains("recaptcha")
 }
 
 /// Thin page ⇒ likely JS shell or empty main (not merely a short article).

@@ -137,7 +137,23 @@ impl Document {
         let base = self.resolve_href(&form.action)?;
         let mut pairs: Vec<(String, String)> = form.hidden.clone();
         pairs.push((form.query_param.clone(), query.to_string()));
-        // url crate query pairs
+
+        // Google: force basic HTML mode (`gbv=1`). Full Google + automation = CAPTCHA.
+        // Drop session/fingerprint hidden fields that make us look like a broken bot.
+        let host = base.host_str().unwrap_or("").to_ascii_lowercase();
+        if host.contains("google.") {
+            pairs.retain(|(k, _)| {
+                let k = k.as_str();
+                k == "q" || k == "hl" || k == "gbv" || k == "ie"
+            });
+            if !pairs.iter().any(|(k, _)| k == "gbv") {
+                pairs.push(("gbv".into(), "1".into()));
+            }
+            if !pairs.iter().any(|(k, _)| k == "hl") {
+                pairs.push(("hl".into(), "en".into()));
+            }
+        }
+
         let mut url = base;
         {
             let mut ser = url.query_pairs_mut();
@@ -147,6 +163,44 @@ impl Document {
             }
         }
         Some(url.to_string())
+    }
+
+    /// Page is a bot/CAPTCHA wall (Google "unusual traffic", etc.).
+    pub fn looks_like_captcha(&self) -> bool {
+        let blob = format!(
+            "{} {}",
+            self.title.to_ascii_lowercase(),
+            self.blocks
+                .iter()
+                .take(20)
+                .map(|b| match b {
+                    Block::Heading { text, .. } | Block::Pre { text } => text.clone(),
+                    Block::Paragraph { spans }
+                    | Block::ListItem { spans }
+                    | Block::Quote { spans } => spans
+                        .iter()
+                        .map(|s| match s {
+                            Span::Text { text } | Span::Link { text, .. } => text.as_str(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    _ => String::new(),
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase()
+        );
+        blob.contains("captcha")
+            || blob.contains("unusual traffic")
+            || blob.contains("not a robot")
+            || blob.contains("recaptcha")
+            || blob.contains("trouble accessing google")
+            || blob.contains("bots use duckduckgo")
+            || blob.contains("complete the following challenge")
+            || blob.contains("our systems have detected")
+            || blob.contains("enable javascript")
+                && self.url.to_ascii_lowercase().contains("google.")
+            || self.url.to_ascii_lowercase().contains("/sorry/")
     }
 
     /// Rough content weight for thin-page detection / UI.

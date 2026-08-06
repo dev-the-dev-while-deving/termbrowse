@@ -644,6 +644,9 @@ fn draw_content(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn brand_label(doc: &Document) -> String {
+    if doc.looks_like_captcha() || doc.title.contains("CAPTCHA") {
+        return "Search blocked".into();
+    }
     let host = url::Url::parse(&doc.url)
         .ok()
         .and_then(|u| u.host_str().map(|s| s.to_string()))

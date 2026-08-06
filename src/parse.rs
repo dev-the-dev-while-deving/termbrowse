@@ -187,7 +187,19 @@ fn score_search_form(action: &str, query_param: &str, placeholder: &str) -> i32 
 }
 
 /// Ensure search engines always get a typeable form.
+/// Google always uses our clean `gbv=1` form (scraped Google forms → CAPTCHA).
 pub fn attach_known_forms(doc: &mut Document) {
+    let host = url::Url::parse(&doc.url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+        .unwrap_or_default();
+
+    if host.contains("google.") {
+        if let Some(f) = known_engine_form(&doc.url) {
+            doc.forms = vec![f];
+        }
+        return;
+    }
     if doc.forms.is_empty() {
         if let Some(f) = known_engine_form(&doc.url) {
             doc.forms.push(f);
@@ -204,17 +216,20 @@ fn known_engine_form(page_url: &str) -> Option<SearchForm> {
         .unwrap_or_default();
 
     if host.contains("google.") {
+        // Google often CAPTCHAs terminal clients. Still offer gbv=1; captcha UI
+        // falls back to DuckDuckGo. Prefer DDG for reliable terminal search.
         return Some(SearchForm {
             action: "https://www.google.com/search".into(),
             method: "get".into(),
             query_param: "q".into(),
-            placeholder: "Search Google…".into(),
-            hidden: vec![],
+            placeholder: "Search Google… (may CAPTCHA — try DuckDuckGo)".into(),
+            hidden: vec![("gbv".into(), "1".into()), ("hl".into(), "en".into())],
         });
     }
     if host.contains("duckduckgo.") || u.contains("duckduckgo.com") {
+        // HTML version is friendlier for terminal clients.
         return Some(SearchForm {
-            action: "https://duckduckgo.com/".into(),
+            action: "https://html.duckduckgo.com/html/".into(),
             method: "get".into(),
             query_param: "q".into(),
             placeholder: "Search DuckDuckGo…".into(),
@@ -240,6 +255,70 @@ fn known_engine_form(page_url: &str) -> Option<SearchForm> {
         });
     }
     None
+}
+
+/// Replace CAPTCHA / sorry pages with a clear terminal-native explanation.
+pub fn annotate_if_captcha(doc: &mut Document) {
+    if !doc.looks_like_captcha() {
+        // Also detect from URL alone
+        let u = doc.url.to_ascii_lowercase();
+        if !u.contains("/sorry/") && !u.contains("captcha") {
+            return;
+        }
+    }
+    let original = doc.url.clone();
+    doc.title = "Blocked by CAPTCHA".into();
+    doc.blocks = vec![
+        Block::Heading {
+            level: 1,
+            text: "This site wants a CAPTCHA".into(),
+        },
+        Block::Spacer,
+        Block::Paragraph {
+            spans: vec![Span::Text {
+                text: "Google (and some other engines) treat automated / terminal clients as bots \
+and show a CAPTCHA. termbrowse cannot solve those in the TUI."
+                    .into(),
+            }],
+        },
+        Block::Spacer,
+        Block::Paragraph {
+            spans: vec![Span::Text {
+                text: "What works better:".into(),
+            }],
+        },
+        Block::ListItem {
+            spans: vec![Span::Text {
+                text: "DuckDuckGo HTML — try o then html.duckduckgo.com".into(),
+            }],
+        },
+        Block::ListItem {
+            spans: vec![Span::Text {
+                text: "Google basic HTML (gbv=1) — already used when possible; still may block some IPs"
+                    .into(),
+            }],
+        },
+        Block::ListItem {
+            spans: vec![Span::Text {
+                text: "Docs / blogs / most non-search sites — structure path is fine".into(),
+            }],
+        },
+        Block::Spacer,
+        Block::Paragraph {
+            spans: vec![Span::Text {
+                text: format!("Blocked URL: {original}"),
+            }],
+        },
+    ];
+    // Offer DDG as a typeable form so the user can keep searching.
+    doc.forms = vec![SearchForm {
+        action: "https://html.duckduckgo.com/html/".into(),
+        method: "get".into(),
+        query_param: "q".into(),
+        placeholder: "Search DuckDuckGo instead…".into(),
+        hidden: vec![],
+    }];
+    doc.links.clear();
 }
 
 fn walk_element(
@@ -549,11 +628,13 @@ mod tests {
 
     #[test]
     fn google_gets_search_form() {
-        let doc = parse_html("https://www.google.com/", "<html><body></body></html>", 1);
+        let mut doc = parse_html("https://www.google.com/", "<html><body></body></html>", 1);
+        attach_known_forms(&mut doc);
         assert!(!doc.forms.is_empty());
         let url = doc.search_url("rust lang").unwrap();
         assert!(url.contains("google.com/search"));
         assert!(url.contains("q=rust"));
+        assert!(url.contains("gbv=1"), "google search must use basic HTML: {url}");
     }
 
     #[test]

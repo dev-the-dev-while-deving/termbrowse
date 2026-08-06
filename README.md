@@ -53,7 +53,13 @@ cargo run --release -- --pixels https://example.com
 | `r` | Reload |
 | `q` | Quit |
 
-Search homes (Google, DuckDuckGo, Bing, YouTube) show a **Grok-style centered prompt** in the middle of the screen. Enter runs the query; results load as structured content + links.
+Search homes show a **Grok-style centered prompt**. Enter runs the query; results load as structured content + links.
+
+**Google CAPTCHA:** Google often blocks terminal/automated clients. termbrowse uses Google basic HTML (`gbv=1`) and **never** opens Google in headless Chrome (that almost always CAPTCHAs). If Google still blocks you, the UI explains it and offers **DuckDuckGo HTML**, which works much more reliably:
+
+```bash
+./target/release/termbrowse https://html.duckduckgo.com/html/
+```
 
 Title bar shows **structure** (fast path) or **escalated** (Chrome extract).
 
