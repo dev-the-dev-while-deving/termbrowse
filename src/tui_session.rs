@@ -32,10 +32,12 @@ pub struct App {
     selected_link: usize,
     status: String,
     width: u16,
+    pub height: u16,
     focus: Focus,
     search_buf: String,
     open_buf: String,
     render_mode: crate::render_engine::RenderMode,
+    pub pending_nav: Option<String>,
     img_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
@@ -62,10 +64,12 @@ impl App {
             selected_link: 0,
             status,
             width: 80,
+            height: 30,
             focus,
             search_buf: String::new(),
             open_buf: String::new(),
             render_mode,
+            pending_nav: None,
             img_tx: None,
         };
         app.relayout(80);
@@ -87,7 +91,7 @@ impl App {
         }
         self.relayout(self.width);
         if let Some(ref tx) = self.img_tx {
-            spawn_image_fetcher(self.doc(), self.width, self.render_mode, tx);
+            spawn_image_fetcher(self.doc(), tx);
         }
     }
 
@@ -199,6 +203,7 @@ fn status_for(page: &crate::session::LoadedPage) -> String {
 
 pub async fn run(url: &str, render_mode: crate::render_engine::RenderMode) -> Result<()> {
     let mut terminal = ratatui::init();
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
     let size = terminal.size().unwrap_or(Size {
         width: 100,
         height: 30,
@@ -206,24 +211,25 @@ pub async fn run(url: &str, render_mode: crate::render_engine::RenderMode) -> Re
 
     let mut app = match App::open(url, render_mode).await {
         Ok(mut a) => {
+            a.height = size.height;
             a.relayout(size.width);
             a
         }
         Err(e) => {
+            let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
             ratatui::restore();
             return Err(e);
         }
     };
 
     let result = event_loop(&mut terminal, &mut app).await;
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
     result
 }
 
 fn spawn_image_fetcher(
     doc: &Document,
-    target_cols: u16,
-    mode: crate::render_engine::RenderMode,
     tx: &tokio::sync::mpsc::UnboundedSender<String>,
 ) {
     let mut image_urls = Vec::new();
@@ -239,7 +245,6 @@ fn spawn_image_fetcher(
         return;
     }
 
-    let cols = target_cols.saturating_sub(4).max(20).min(60);
     let tx = tx.clone();
     tokio::spawn(async move {
         let cache = crate::image_cache::get_image_cache();
@@ -265,45 +270,89 @@ fn spawn_image_fetcher(
                 }
             }
 
-            if let Some(dyn_img) = dyn_img_opt {
-                let rlines = crate::render_engine::render_image_to_lines(
-                    &dyn_img,
-                    cols,
-                    mode,
-                );
-                let mut spans_matrix = Vec::with_capacity(rlines.len());
-                for rline in rlines {
-                    let mut col_spans = Vec::with_capacity(rline.spans.len());
-                    for span in rline.spans {
-                        let fg_rgb = match span.style.fg {
-                            Some(ratatui::style::Color::Rgb(r, g, b)) => (r, g, b),
-                            _ => (200, 200, 200),
-                        };
-                        let bg_rgb = match span.style.bg {
-                            Some(ratatui::style::Color::Rgb(r, g, b)) => (r, g, b),
-                            _ => (13, 13, 16),
-                        };
-                        col_spans.push(crate::layout::ColoredSpan {
-                            text: span.content.to_string(),
-                            fg_rgb,
-                            bg_rgb,
-                        });
-                    }
-                    spans_matrix.push(col_spans);
-                }
-                cache.put_rendered_spans(&url, cols, spans_matrix);
+            if dyn_img_opt.is_some() {
                 let _ = tx.send(url);
             }
         }
     });
 }
 
+fn handle_mouse(mouse: crossterm::event::MouseEvent, app: &mut App) {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    match mouse.kind {
+        MouseEventKind::ScrollDown => {
+            let view_h = app.height.saturating_sub(3);
+            let max_scroll = app.layout.lines.len().saturating_sub(view_h as usize) as u16;
+            app.scroll = (app.scroll + 3).min(max_scroll);
+        }
+        MouseEventKind::ScrollUp => {
+            app.scroll = app.scroll.saturating_sub(3);
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            let content_top = 1;
+            let content_bottom = app.height.saturating_sub(2);
+            if mouse.row < content_top || mouse.row >= content_bottom {
+                return;
+            }
+            let layout_row = (mouse.row - content_top) as usize + app.scroll as usize;
+            if layout_row >= app.layout.lines.len() {
+                return;
+            }
+            let line = &app.layout.lines[layout_row];
+            let seg_col = mouse.column.saturating_sub(2);
+            let mut offset = 0u16;
+
+            for seg in &line.segments {
+                let seg_width = match seg {
+                    Segment::Text { text, .. } => unicode_width::UnicodeWidthStr::width(text.as_str()) as u16,
+                    Segment::Link { text, .. } => unicode_width::UnicodeWidthStr::width(text.as_str()) as u16,
+                    Segment::ColoredSpans { spans } => {
+                        spans.iter().map(|s| unicode_width::UnicodeWidthStr::width(s.text.as_str()) as u16).sum()
+                    }
+                };
+                if seg_col >= offset && seg_col < offset + seg_width {
+                    if let Segment::Link { r#ref, .. } = seg {
+                        if let Some(pos) = app.layout.link_order.iter().position(|r| r == r#ref) {
+                            app.selected_link = pos;
+                        }
+                        if let Some(link) = app.doc().resolve_link(*r#ref) {
+                            let href = app.doc().resolve_href(&link.href)
+                                .map(|u| u.to_string())
+                                .unwrap_or_else(|| link.href.clone());
+                            app.pending_nav = Some(href);
+                        }
+                    }
+                    break;
+                }
+                offset += seg_width;
+            }
+        }
+        _ => {}
+    }
+}
+
 async fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     app.img_tx = Some(tx.clone());
-    spawn_image_fetcher(app.doc(), app.width, app.render_mode, &tx);
+    spawn_image_fetcher(app.doc(), &tx);
 
     loop {
+        if let Some(nav_url) = app.pending_nav.take() {
+            match App::open(&nav_url, app.render_mode).await {
+                Ok(mut new_app) => {
+                    new_app.img_tx = app.img_tx.clone();
+                    *app = new_app;
+                    app.relayout(terminal.size()?.width);
+                    if let Some(ref tx) = app.img_tx {
+                        spawn_image_fetcher(app.doc(), tx);
+                    }
+                }
+                Err(e) => {
+                    app.status = format!("Nav error: {e}");
+                }
+            }
+        }
+
         let mut reflow = false;
         while let Ok(_img_url) = rx.try_recv() {
             reflow = true;
@@ -319,18 +368,27 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> R
         }
 
         let ev = event::read()?;
-        if let Event::Resize(cols, _rows) = ev {
-            crate::image_cache::get_image_cache().invalidate_render_cache();
-            app.relayout(cols);
-            if let Some(ref tx) = app.img_tx {
-                spawn_image_fetcher(app.doc(), app.width, app.render_mode, tx);
+        let Event::Key(key) = (match ev {
+            Event::Resize(cols, rows) => {
+                app.width = cols;
+                app.height = rows;
+                crate::image_cache::get_image_cache().invalidate_render_cache();
+                app.relayout(cols);
+                if let Some(ref tx) = app.img_tx {
+                    spawn_image_fetcher(app.doc(), tx);
+                }
+                continue;
             }
-            continue;
-        }
-
-        let Event::Key(key) = ev else {
+            Event::Mouse(mouse) => {
+                handle_mouse(mouse, app);
+                continue;
+            }
+            Event::Key(k) => Event::Key(k),
+            _ => continue,
+        }) else {
             continue;
         };
+
         if key.kind != KeyEventKind::Press {
             continue;
         }
@@ -891,4 +949,36 @@ fn truncate(s: &str, max: usize) -> String {
         out.push(ch);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{MouseEvent, MouseEventKind};
+
+    #[tokio::test]
+    async fn test_mouse_scrolling() {
+        let mut app = App::open("https://example.com", crate::render_engine::RenderMode::HalfBlock)
+            .await
+            .unwrap();
+        app.height = 30;
+        assert_eq!(app.scroll, 0);
+
+        let scroll_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(scroll_down, &mut app);
+
+        let scroll_up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(scroll_up, &mut app);
+        assert_eq!(app.scroll, 0);
+    }
 }
