@@ -4,7 +4,10 @@
 //! No headless Chrome. No screenshot paint. Same Document for humans + agents.
 
 mod fetch;
+mod image_cache;
+mod image_decoder;
 mod layout;
+mod render_engine;
 mod model;
 mod parse;
 mod session;
@@ -36,6 +39,14 @@ struct Cli {
     /// Terminal width for snapshot/text layout
     #[arg(long, default_value_t = 100)]
     width: u16,
+
+    /// Disable image loading and rendering
+    #[arg(long, default_value_t = false)]
+    no_images: bool,
+
+    /// Image render mode: halfblock, ascii, braille
+    #[arg(long, default_value = "halfblock")]
+    image_mode: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -69,16 +80,22 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let mode = match cli.image_mode.to_ascii_lowercase().as_str() {
+        "ascii" => render_engine::RenderMode::Ascii,
+        "braille" => render_engine::RenderMode::Braille,
+        "kitty" => render_engine::RenderMode::Kitty,
+        _ => render_engine::RenderMode::HalfBlock,
+    };
 
     match cli.command {
         Some(Commands::Open { url }) => {
             let url = ensure_http_url(&url)?;
-            tui_session::run(&url).await?;
+            tui_session::run(&url, mode).await?;
         }
         Some(Commands::Snapshot { url, text, width }) => {
             let url = ensure_http_url(&url)?;
             let page = load_page(&url).await?;
-            let lay = layout_document(&page.doc, width);
+            let lay = layout_document(&page.doc, width, mode);
             let mut snap = snapshot(&page.doc, if text { Some(&lay) } else { None });
             if !text {
                 snap.layout = None;
@@ -96,7 +113,7 @@ async fn main() -> Result<()> {
         Some(Commands::Text { url, width }) => {
             let url = ensure_http_url(&url)?;
             let page = load_page(&url).await?;
-            let lay = layout_document(&page.doc, width);
+            let lay = layout_document(&page.doc, width, mode);
             let snap = snapshot(&page.doc, Some(&lay));
             if let Some(layout) = snap.layout {
                 print!("{}", layout.text);
@@ -107,7 +124,7 @@ async fn main() -> Result<()> {
                 .url
                 .context("usage: termbrowse <url>\n  termbrowse snapshot <url>\n  termbrowse text <url>")?;
             let url = ensure_http_url(&url)?;
-            tui_session::run(&url).await?;
+            tui_session::run(&url, mode).await?;
         }
     }
 

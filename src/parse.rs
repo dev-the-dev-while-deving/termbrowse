@@ -33,7 +33,7 @@ pub fn parse_html(url: &str, html: &str, fetch_ms: u64) -> Document {
         .or_else(|| roots.iter().find(|e| e.value().name() == "body"));
 
     if let Some(scope) = scope {
-        walk_element(scope, &mut blocks, &mut links, &mut next_ref, 0);
+        walk_element(scope, url, &mut blocks, &mut links, &mut next_ref, 0);
     }
 
     // Collapse runs of spacers.
@@ -326,6 +326,7 @@ and show a CAPTCHA. termbrowse cannot solve those in the TUI."
 
 fn walk_element(
     el: &scraper::ElementRef<'_>,
+    page_url: &str,
     blocks: &mut Vec<Block>,
     links: &mut Vec<Link>,
     next_ref: &mut u32,
@@ -364,7 +365,7 @@ fn walk_element(
                 if cn == "legend" || cn == "figcaption" {
                     continue;
                 }
-                walk_element(&child_el, &mut inner_blocks, links, next_ref, list_depth);
+                walk_element(&child_el, page_url, &mut inner_blocks, links, next_ref, list_depth);
             }
         }
         let lines = blocks_to_frame_lines(&inner_blocks);
@@ -428,7 +429,25 @@ fn walk_element(
                 .unwrap_or("")
                 .trim()
                 .to_string();
-            blocks.push(Block::Image { alt });
+            let raw_src = el
+                .value()
+                .attr("src")
+                .or_else(|| el.value().attr("data-src"))
+                .or_else(|| el.value().attr("data-lazy-src"))
+                .or_else(|| {
+                    el.value().attr("srcset").and_then(|s| s.split_whitespace().next())
+                })
+                .unwrap_or("")
+                .trim();
+            let src = crate::urlutil::resolve_image_url(page_url, raw_src);
+            let width = el.value().attr("width").and_then(|w| w.parse::<u32>().ok());
+            let height = el.value().attr("height").and_then(|h| h.parse::<u32>().ok());
+            blocks.push(Block::Image {
+                src,
+                alt,
+                width,
+                height,
+            });
             blocks.push(Block::Spacer);
         }
         "table" => {
@@ -447,7 +466,7 @@ fn walk_element(
             } else {
                 for child in el.children() {
                     if let Some(child_el) = scraper::ElementRef::wrap(child) {
-                        walk_element(&child_el, blocks, links, next_ref, list_depth);
+                        walk_element(&child_el, page_url, blocks, links, next_ref, list_depth);
                     }
                 }
             }
@@ -455,7 +474,7 @@ fn walk_element(
         "ul" => {
             for child in el.children() {
                 if let Some(child_el) = scraper::ElementRef::wrap(child) {
-                    walk_element(&child_el, blocks, links, next_ref, list_depth.saturating_add(1));
+                    walk_element(&child_el, page_url, blocks, links, next_ref, list_depth.saturating_add(1));
                 }
             }
             blocks.push(Block::Spacer);
@@ -473,6 +492,7 @@ fn walk_element(
                     } else {
                         walk_element(
                             &child_el,
+                            page_url,
                             blocks,
                             links,
                             next_ref,
@@ -494,7 +514,7 @@ fn walk_element(
         | "details" | "summary" | "center" | "font" => {
             for child in el.children() {
                 if let Some(child_el) = scraper::ElementRef::wrap(child) {
-                    walk_element(&child_el, blocks, links, next_ref, list_depth);
+                    walk_element(&child_el, page_url, blocks, links, next_ref, list_depth);
                 } else if let Node::Text(t) = child.value() {
                     let text = normalize_ws(t);
                     if !text.is_empty() && is_blockish_parent(el) {
@@ -509,7 +529,7 @@ fn walk_element(
         _ => {
             for child in el.children() {
                 if let Some(child_el) = scraper::ElementRef::wrap(child) {
-                    walk_element(&child_el, blocks, links, next_ref, list_depth);
+                    walk_element(&child_el, page_url, blocks, links, next_ref, list_depth);
                 }
             }
         }
@@ -599,7 +619,7 @@ fn blocks_to_frame_lines(blocks: &[Block]) -> Vec<Vec<Span>> {
                     }]);
                 }
             }
-            Block::Image { alt } => lines.push(vec![Span::Em {
+            Block::Image { alt, .. } => lines.push(vec![Span::Em {
                 text: if alt.is_empty() {
                     "[image]".into()
                 } else {

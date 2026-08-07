@@ -18,10 +18,18 @@ pub struct LayoutLine {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ColoredSpan {
+    pub text: String,
+    pub fg_rgb: (u8, u8, u8),
+    pub bg_rgb: (u8, u8, u8),
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Segment {
     Text { text: String, style: Style },
     Link { r#ref: Ref, text: String },
+    ColoredSpans { spans: Vec<ColoredSpan> },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -41,7 +49,11 @@ pub enum Style {
     Image,
 }
 
-pub fn layout_document(doc: &Document, width: u16) -> Layout {
+pub fn layout_document(
+    doc: &Document,
+    width: u16,
+    mode: crate::render_engine::RenderMode,
+) -> Layout {
     let width = width.max(24) as usize;
     let mut lines = Vec::new();
     let mut link_order = Vec::new();
@@ -106,13 +118,57 @@ pub fn layout_document(doc: &Document, width: u16) -> Layout {
             Block::Spacer => {
                 lines.push(line_text(String::new(), Style::Normal));
             }
-            Block::Image { alt } => {
-                let label = if alt.is_empty() {
-                    "[ image ]".into()
+            Block::Image { alt, src, .. } => {
+                let cache = crate::image_cache::get_image_cache();
+                let cols = (width as u16).min(60);
+                if let Some(spans_lines) = cache.get_rendered_spans(src, cols) {
+                    for col_spans in spans_lines {
+                        lines.push(LayoutLine {
+                            segments: vec![Segment::ColoredSpans { spans: col_spans }],
+                        });
+                    }
+                } else if let Some(dyn_img) = cache.get_mem_image(src) {
+                    let rendered_lines = crate::render_engine::render_image_to_lines(
+                        &dyn_img,
+                        cols,
+                        mode,
+                    );
+                    let mut spans_matrix = Vec::with_capacity(rendered_lines.len());
+                    for rline in rendered_lines {
+                        let mut col_spans = Vec::new();
+                        for span in rline.spans {
+                            let fg_rgb = match span.style.fg {
+                                Some(ratatui::style::Color::Rgb(r, g, b)) => (r, g, b),
+                                _ => (200, 200, 200),
+                            };
+                            let bg_rgb = match span.style.bg {
+                                Some(ratatui::style::Color::Rgb(r, g, b)) => (r, g, b),
+                                _ => (13, 13, 16),
+                            };
+                            col_spans.push(ColoredSpan {
+                                text: span.content.to_string(),
+                                fg_rgb,
+                                bg_rgb,
+                            });
+                        }
+                        lines.push(LayoutLine {
+                            segments: vec![Segment::ColoredSpans { spans: col_spans.clone() }],
+                        });
+                        spans_matrix.push(col_spans);
+                    }
+                    cache.put_rendered_spans(src, cols, spans_matrix);
                 } else {
-                    format!("[ img: {alt} ]")
-                };
-                push_wrapped(&mut lines, &label, Style::Image, width);
+                    let label = if alt.is_empty() {
+                        if src.is_empty() {
+                            "[ image ]".into()
+                        } else {
+                            format!("[ img: {src} ]")
+                        }
+                    } else {
+                        format!("[ img: {alt} ]")
+                    };
+                    push_wrapped(&mut lines, &label, Style::Image, width);
+                }
             }
             Block::Caption { text } => {
                 push_wrapped(&mut lines, &format!("  {text}"), Style::Dim, width);
@@ -291,6 +347,11 @@ fn push_box(
                             text: t,
                         });
                     }
+                    Segment::ColoredSpans { spans: col_spans } => {
+                        segs.push(Segment::ColoredSpans {
+                            spans: col_spans.clone(),
+                        });
+                    }
                 }
             }
             if used < inner_w {
@@ -403,6 +464,10 @@ fn wrap_segments(segs: &[Segment], width: usize) -> Vec<Vec<Segment>> {
                     }
                     tokens.push((word.to_string(), Some(*r#ref), Style::Normal));
                 }
+            }
+            Segment::ColoredSpans { spans: col_spans } => {
+                let full_text: String = col_spans.iter().map(|s| s.text.as_str()).collect();
+                tokens.push((full_text, None, Style::Image));
             }
         }
     }

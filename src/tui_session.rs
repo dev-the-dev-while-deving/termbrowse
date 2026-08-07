@@ -11,7 +11,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use std::time::Duration;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Focus {
     /// Centered page search (Google-style).
     Search,
@@ -19,6 +19,9 @@ enum Focus {
     Content,
     /// `:` open URL bar at bottom.
     OpenUrl,
+    /// Full-screen image modal inspection overlay.
+    #[allow(dead_code)]
+    ModalImage { url: String, mode: crate::render_engine::RenderMode },
 }
 
 pub struct App {
@@ -30,20 +33,19 @@ pub struct App {
     status: String,
     width: u16,
     focus: Focus,
-    /// Query typed into the page search form.
     search_buf: String,
-    /// Bottom open-url buffer when Focus::OpenUrl.
     open_buf: String,
+    render_mode: crate::render_engine::RenderMode,
+    img_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 impl App {
-    pub async fn open(url: &str) -> Result<Self> {
+    pub async fn open(url: &str, render_mode: crate::render_engine::RenderMode) -> Result<Self> {
         let mut session = Session::new();
         let page = session.open(url).await?;
         let theme = Theme::groknight();
         let status = status_for(page);
         let focus = if page.doc.is_search_home() || page.doc.primary_search().is_some() {
-            // Prefer search when a form exists; center layout when search-home.
             Focus::Search
         } else {
             Focus::Content
@@ -63,6 +65,8 @@ impl App {
             focus,
             search_buf: String::new(),
             open_buf: String::new(),
+            render_mode,
+            img_tx: None,
         };
         app.relayout(80);
         Ok(app)
@@ -82,12 +86,15 @@ impl App {
             self.focus = Focus::Content;
         }
         self.relayout(self.width);
+        if let Some(ref tx) = self.img_tx {
+            spawn_image_fetcher(self.doc(), self.width, self.render_mode, tx);
+        }
     }
 
     fn relayout(&mut self, width: u16) {
         self.width = width;
         let content_w = width.saturating_sub(4).max(20);
-        self.layout = layout::layout_document(self.doc(), content_w);
+        self.layout = layout::layout_document(self.doc(), content_w, self.render_mode);
         self.clamp_scroll(0);
     }
 
@@ -190,14 +197,14 @@ fn status_for(page: &crate::session::LoadedPage) -> String {
     )
 }
 
-pub async fn run(url: &str) -> Result<()> {
+pub async fn run(url: &str, render_mode: crate::render_engine::RenderMode) -> Result<()> {
     let mut terminal = ratatui::init();
     let size = terminal.size().unwrap_or(Size {
         width: 100,
         height: 30,
     });
 
-    let mut app = match App::open(url).await {
+    let mut app = match App::open(url, render_mode).await {
         Ok(mut a) => {
             a.relayout(size.width);
             a
@@ -213,14 +220,115 @@ pub async fn run(url: &str) -> Result<()> {
     result
 }
 
+fn spawn_image_fetcher(
+    doc: &Document,
+    target_cols: u16,
+    mode: crate::render_engine::RenderMode,
+    tx: &tokio::sync::mpsc::UnboundedSender<String>,
+) {
+    let mut image_urls = Vec::new();
+    for b in &doc.blocks {
+        if let crate::model::Block::Image { src, .. } = b {
+            if !src.is_empty() && (src.starts_with("http://") || src.starts_with("https://")) {
+                image_urls.push(src.clone());
+            }
+        }
+    }
+
+    if image_urls.is_empty() {
+        return;
+    }
+
+    let cols = target_cols.saturating_sub(4).max(20).min(60);
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let cache = crate::image_cache::get_image_cache();
+        for url in image_urls {
+            let mut dyn_img_opt = cache.get_mem_image(&url);
+
+            if dyn_img_opt.is_none() {
+                if let Some(disk_bytes) = cache.get_disk_bytes(&url) {
+                    if let Ok(decoded) = crate::image_decoder::decode_image_bytes(&disk_bytes) {
+                        cache.put_mem_image(&url, decoded.clone());
+                        dyn_img_opt = Some(decoded);
+                    }
+                }
+            }
+
+            if dyn_img_opt.is_none() {
+                if let Ok(fetched) = crate::fetch::fetch_image(&url).await {
+                    if let Ok(decoded) = crate::image_decoder::decode_image_bytes(&fetched.bytes) {
+                        cache.put_disk_bytes(&url, &fetched.bytes);
+                        cache.put_mem_image(&url, decoded.clone());
+                        dyn_img_opt = Some(decoded);
+                    }
+                }
+            }
+
+            if let Some(dyn_img) = dyn_img_opt {
+                let rlines = crate::render_engine::render_image_to_lines(
+                    &dyn_img,
+                    cols,
+                    mode,
+                );
+                let mut spans_matrix = Vec::with_capacity(rlines.len());
+                for rline in rlines {
+                    let mut col_spans = Vec::with_capacity(rline.spans.len());
+                    for span in rline.spans {
+                        let fg_rgb = match span.style.fg {
+                            Some(ratatui::style::Color::Rgb(r, g, b)) => (r, g, b),
+                            _ => (200, 200, 200),
+                        };
+                        let bg_rgb = match span.style.bg {
+                            Some(ratatui::style::Color::Rgb(r, g, b)) => (r, g, b),
+                            _ => (13, 13, 16),
+                        };
+                        col_spans.push(crate::layout::ColoredSpan {
+                            text: span.content.to_string(),
+                            fg_rgb,
+                            bg_rgb,
+                        });
+                    }
+                    spans_matrix.push(col_spans);
+                }
+                cache.put_rendered_spans(&url, cols, spans_matrix);
+                let _ = tx.send(url);
+            }
+        }
+    });
+}
+
 async fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    app.img_tx = Some(tx.clone());
+    spawn_image_fetcher(app.doc(), app.width, app.render_mode, &tx);
+
     loop {
+        let mut reflow = false;
+        while let Ok(_img_url) = rx.try_recv() {
+            reflow = true;
+        }
+        if reflow {
+            app.relayout(app.width);
+        }
+
         terminal.draw(|f| draw(f, app))?;
 
         if !event::poll(Duration::from_millis(80))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
+
+        let ev = event::read()?;
+        if let Event::Resize(cols, _rows) = ev {
+            crate::image_cache::get_image_cache().invalidate_render_cache();
+            app.relayout(cols);
+            if let Some(ref tx) = app.img_tx {
+                spawn_image_fetcher(app.doc(), app.width, app.render_mode, tx);
+            }
+            continue;
+        }
+
+        let Event::Key(key) = ev else {
             continue;
         };
         if key.kind != KeyEventKind::Press {
@@ -232,6 +340,44 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> R
         app.clamp_scroll(view_h);
 
         match app.focus {
+            Focus::ModalImage { ref url, mode } => {
+                let url = url.clone();
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        app.focus = Focus::Content;
+                    }
+                    KeyCode::Char('m') => {
+                        let next_mode = match mode {
+                            crate::render_engine::RenderMode::HalfBlock => {
+                                crate::render_engine::RenderMode::Ascii
+                            }
+                            crate::render_engine::RenderMode::Ascii => {
+                                crate::render_engine::RenderMode::Braille
+                            }
+                            _ => crate::render_engine::RenderMode::HalfBlock,
+                        };
+                        app.focus = Focus::ModalImage {
+                            url,
+                            mode: next_mode,
+                        };
+                    }
+                    KeyCode::Char('s') => {
+                        if let Some(bytes) = crate::image_cache::get_image_cache().get_disk_bytes(&url) {
+                            let _ = std::fs::create_dir_all("downloads");
+                            let ts = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let filename = format!("downloads/image_{ts}.png");
+                            if std::fs::write(&filename, bytes).is_ok() {
+                                app.status = format!("saved image to {filename}");
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             Focus::OpenUrl => {
                 match key.code {
                     KeyCode::Esc => {
@@ -443,11 +589,41 @@ fn draw(frame: &mut Frame, app: &App) {
         draw_centered_search(frame, app, body);
     } else {
         draw_content(frame, app, body);
-        // Compact strip when searching from a results page
         if app.focus == Focus::Search && page.doc.primary_search().is_some() {
             draw_top_search_bar(frame, app, body);
         }
     }
+
+    if let Focus::ModalImage { ref url, mode } = app.focus {
+        draw_modal_image(frame, app, area, url, mode);
+    }
+
+fn draw_modal_image(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    url: &str,
+    mode: crate::render_engine::RenderMode,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.accent))
+        .title(format!(
+            " Image Viewer [{mode:?}] — [m] mode [s] save [esc] close "
+        ));
+
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    let cache = crate::image_cache::get_image_cache();
+    if let Some(dyn_img) = cache.get_mem_image(url) {
+        let lines = crate::render_engine::render_image_to_lines(&dyn_img, inner.width, mode);
+        frame.render_widget(Paragraph::new(lines), inner);
+    } else {
+        frame.render_widget(Paragraph::new("Loading image pixels..."), inner);
+    }
+}
 
     // Status
     let link_info = match app.selected_ref().and_then(|r| app.doc().resolve_link(r)) {
@@ -474,7 +650,7 @@ fn draw(frame: &mut Frame, app: &App) {
                 format!(" > search: {}█", app.search_buf)
             }
         }
-        Focus::Content => format!(" > {}{}", app.status, link_info),
+        Focus::Content | Focus::ModalImage { .. } => format!(" > {}{}", app.status, link_info),
     };
 
     let help = match app.focus {
@@ -483,6 +659,7 @@ fn draw(frame: &mut Frame, app: &App) {
         Focus::Content => {
             " j/k scroll · tab links · enter open · / search · [ ] history · o url · q "
         }
+        Focus::ModalImage { .. } => " m toggle render mode · s save image to disk · esc close ",
     };
 
     frame.render_widget(
@@ -647,6 +824,18 @@ fn draw_content(frame: &mut Frame, app: &App, area: Rect) {
                 Segment::Link { r#ref, text } => {
                     let active = Some(*r#ref) == selected;
                     spans.push(Span::styled(text.clone(), th.link(active)));
+                }
+                Segment::ColoredSpans { spans: col_spans } => {
+                    for cspan in col_spans {
+                        let (fr, fg, fb) = cspan.fg_rgb;
+                        let (br, bg, bb) = cspan.bg_rgb;
+                        spans.push(Span::styled(
+                            cspan.text.clone(),
+                            Style::default()
+                                .fg(Color::Rgb(fr, fg, fb))
+                                .bg(Color::Rgb(br, bg, bb)),
+                        ));
+                    }
                 }
             }
         }

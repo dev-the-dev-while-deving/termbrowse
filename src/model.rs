@@ -77,9 +77,12 @@ pub enum Block {
     /// Horizontal rule.
     Hr,
     Spacer,
-    /// Image → minimal placeholder (alt text), not pixels.
+    /// Image -> metadata and URL for rendering.
     Image {
+        src: String,
         alt: String,
+        width: Option<u32>,
+        height: Option<u32>,
     },
     /// Table — minimal grid with borders.
     Table {
@@ -231,7 +234,7 @@ fn block_plain(b: &Block) -> String {
         Block::Heading { text, .. }
         | Block::Pre { text }
         | Block::Caption { text }
-        | Block::Image { alt: text } => text.clone(),
+        | Block::Image { alt: text, .. } => text.clone(),
         Block::Paragraph { spans } | Block::ListItem { spans, .. } | Block::Quote { spans } => {
             spans_plain(spans)
         }
