@@ -208,12 +208,11 @@ fn render_halfblock(img: &DynamicImage, target_cols: u32) -> Vec<Line<'static>> 
 
         let mut spans = Vec::with_capacity(top_row.len());
         for x in 0..top_row.len() {
-            let top_px = top_row[x];
-            let bot_px = bot_row[x];
+            let (top_r, top_g, top_b) = blend_pixel(top_row[x]);
+            let (bot_r, bot_g, bot_b) = blend_pixel(bot_row[x]);
 
-            // Blend transparent background with dark terminal theme
-            let fg = Color::Rgb(top_px.r, top_px.g, top_px.b);
-            let bg = Color::Rgb(bot_px.r, bot_px.g, bot_px.b);
+            let fg = Color::Rgb(top_r, top_g, top_b);
+            let bg = Color::Rgb(bot_r, bot_g, bot_b);
 
             spans.push(Span::styled(
                 "▀",
@@ -224,6 +223,20 @@ fn render_halfblock(img: &DynamicImage, target_cols: u32) -> Vec<Line<'static>> 
         y += 2;
     }
     lines
+}
+
+fn blend_pixel(px: crate::image_decoder::RgbaPixel) -> (u8, u8, u8) {
+    let a = px.a as u16;
+    if a == 255 {
+        (px.r, px.g, px.b)
+    } else if a == 0 {
+        (13, 13, 16)
+    } else {
+        let r = ((px.r as u16 * a + 13 * (255 - a)) / 255) as u8;
+        let g = ((px.g as u16 * a + 13 * (255 - a)) / 255) as u8;
+        let b = ((px.b as u16 * a + 13 * (255 - a)) / 255) as u8;
+        (r, g, b)
+    }
 }
 
 /// Grayscale ASCII Art Density Renderer.

@@ -52,345 +52,142 @@ sha2 = "0.10"
 
 ---
 
-### File: `src/main.rs`
+### File: `src/render_engine.rs`
 ```rust
-//! termbrowse — custom interactive terminal browser.
-//!
-//! Pure stack: HTTPS fetch → HTML parse → cell layout → Grok-density TUI.
-//! No headless Chrome. No screenshot paint. Same Document for humans + agents.
+//! Pluggable Terminal Image Renderers & Session-Wide Capability Caching.
 
-mod fetch;
-mod image_cache;
-mod image_decoder;
-mod layout;
-mod render_engine;
-mod model;
-mod parse;
-mod session;
-mod snapshot;
-mod theme;
-mod tui_session;
-mod urlutil;
+use crate::image_decoder::{DynamicImage, to_rgba_matrix};
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
+use std::sync::OnceLock;
 
-use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
-use layout::layout_document;
-use session::{load_page, LoadSource};
-use snapshot::{snapshot, to_json};
-use urlutil::ensure_http_url;
-
-#[derive(Parser, Debug)]
-#[command(
-    name = "termbrowse",
-    about = "Custom terminal web session — structure browser, no Chrome",
-    version
-)]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<Commands>,
-
-    /// Open this URL in the interactive TUI
-    url: Option<String>,
-
-    /// Terminal width for snapshot/text layout
-    #[arg(long, default_value_t = 100)]
-    width: u16,
-
-    /// Disable image loading and rendering
-    #[arg(long, default_value_t = false)]
-    no_images: bool,
-
-    /// Image render mode: halfblock, ascii, braille, kitty
-    #[arg(long, default_value = "halfblock")]
-    image_mode: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderMode {
+    HalfBlock,
+    Ascii,
+    Braille,
+    Kitty,
 }
 
-#[derive(Subcommand, Debug)]
-enum Commands {
-    /// Open a URL in the interactive session TUI
-    Open { url: String },
-    /// Agent JSON snapshot of the structured page
-    Snapshot {
-        url: String,
-        #[arg(long, default_value_t = true)]
-        text: bool,
-        #[arg(long, default_value_t = 100)]
-        width: u16,
-    },
-    /// Plain text layout of the structured page
-    Text {
-        url: String,
-        #[arg(long, default_value_t = 100)]
-        width: u16,
-    },
+#[derive(Debug, Clone)]
+pub struct TerminalCapabilities {
+    #[allow(dead_code)]
+    pub supports_truecolor: bool,
+    pub supports_kitty: bool,
+    #[allow(dead_code)]
+    pub preferred_mode: RenderMode,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+static CAPS_INSTANCE: OnceLock<TerminalCapabilities> = OnceLock::new();
 
-    let cli = Cli::parse();
-    let mode = match cli.image_mode.to_ascii_lowercase().as_str() {
-        "ascii" => render_engine::RenderMode::Ascii,
-        "braille" => render_engine::RenderMode::Braille,
-        "kitty" => render_engine::RenderMode::Kitty,
-        _ => render_engine::RenderMode::HalfBlock,
-    };
+pub fn get_terminal_caps() -> &'static TerminalCapabilities {
+    CAPS_INSTANCE.get_or_init(|| {
+        let colorterm = std::env::var("COLORTERM").unwrap_or_default();
+        let term = std::env::var("TERM").unwrap_or_default();
+        let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
 
-    match cli.command {
-        Some(Commands::Open { url }) => {
-            let url = ensure_http_url(&url)?;
-            tui_session::run(&url, mode).await?;
+        let supports_truecolor = colorterm.contains("truecolor")
+            || colorterm.contains("24bit")
+            || term_program.contains("iTerm")
+            || term_program.contains("Ghostty")
+            || term_program.contains("WezTerm")
+            || term.contains("kitty");
+
+        let supports_kitty = term.contains("kitty")
+            || term_program.contains("Ghostty")
+            || term_program.contains("WezTerm");
+
+        let preferred_mode = if supports_kitty {
+            RenderMode::Kitty
+        } else {
+            RenderMode::HalfBlock
+        };
+
+        TerminalCapabilities {
+            supports_truecolor,
+            supports_kitty,
+            preferred_mode,
         }
-        Some(Commands::Snapshot { url, text, width }) => {
-            let url = ensure_http_url(&url)?;
-            let page = load_page(&url).await?;
-            let lay = layout_document(&page.doc, width, mode);
-            let mut snap = snapshot(&page.doc, if text { Some(&lay) } else { None });
-            if !text {
-                snap.layout = None;
+    })
+}
+
+pub fn render_image_to_lines(
+    img: &DynamicImage,
+    target_cols: u16,
+    mode: RenderMode,
+) -> Vec<Line<'static>> {
+    let target_cols = target_cols.max(10) as u32;
+
+    match mode {
+        RenderMode::HalfBlock => render_halfblock(img, target_cols),
+        RenderMode::Kitty => {
+            let caps = get_terminal_caps();
+            if caps.supports_kitty {
+                render_kitty(img, target_cols)
+            } else {
+                render_halfblock(img, target_cols)
             }
-            let src = match page.source {
-                LoadSource::Structure => "structure",
-            };
-            eprintln!(
-                "source={src} total_ms={} text_len={}",
-                page.total_ms,
-                page.doc.text_len()
-            );
-            println!("{}", to_json(&snap)?);
         }
-        Some(Commands::Text { url, width }) => {
-            let url = ensure_http_url(&url)?;
-            let page = load_page(&url).await?;
-            let lay = layout_document(&page.doc, width, mode);
-            let snap = snapshot(&page.doc, Some(&lay));
-            if let Some(layout) = snap.layout {
-                print!("{}", layout.text);
-            }
-        }
-        None => {
-            let url = cli
-                .url
-                .context("usage: termbrowse <url>\n  termbrowse snapshot <url>\n  termbrowse text <url>")?;
-            let url = ensure_http_url(&url)?;
-            tui_session::run(&url, mode).await?;
-        }
+        RenderMode::Ascii => render_ascii(img, target_cols),
+        RenderMode::Braille => render_braille(img, target_cols),
+    }
+}
+
+fn render_halfblock(img: &DynamicImage, target_cols: u32) -> Vec<Line<'static>> {
+    let (orig_w, orig_h) = (img.width(), img.height());
+    if orig_w == 0 || orig_h == 0 {
+        return Vec::new();
     }
 
-    Ok(())
-}
-```
+    let target_pixel_w = target_cols;
+    let aspect = orig_h as f32 / orig_w as f32;
+    let target_pixel_h = ((target_cols as f32 * aspect * 0.5).max(1.0) * 2.0) as u32;
 
----
+    let resized = img.resize_exact(
+        target_pixel_w,
+        target_pixel_h,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let matrix = to_rgba_matrix(&resized);
 
-### File: `src/layout.rs`
-```rust
-//! Role → terminal cells.
-
-use crate::model::{Block, Document, Ref, Span};
-use serde::Serialize;
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Layout {
-    pub width: u16,
-    pub lines: Vec<LayoutLine>,
-    pub link_order: Vec<Ref>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct LayoutLine {
-    pub segments: Vec<Segment>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ColoredSpan {
-    pub text: String,
-    pub fg_rgb: (u8, u8, u8),
-    pub bg_rgb: (u8, u8, u8),
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Segment {
-    Text { text: String, style: Style },
-    Link { r#ref: Ref, text: String },
-    ColoredSpans { spans: Vec<ColoredSpan> },
-}
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Style {
-    Normal,
-    Heading1,
-    Heading2,
-    Heading3,
-    Dim,
-    Quote,
-    Pre,
-    Strong,
-    Em,
-    Code,
-    Border,
-    Image,
-}
-
-pub fn layout_document(
-    doc: &Document,
-    width: u16,
-    mode: crate::render_engine::RenderMode,
-) -> Layout {
-    let width = width.max(24) as usize;
     let mut lines = Vec::new();
-    let mut link_order = Vec::new();
+    let row_count = matrix.len();
 
-    for block in &doc.blocks {
-        match block {
-            Block::Heading { level, text } => {
-                let style = match level {
-                    1 => Style::Heading1,
-                    2 => Style::Heading2,
-                    _ => Style::Heading3,
-                };
-                let prefix = match level {
-                    1 => "# ",
-                    2 => "## ",
-                    3 => "### ",
-                    _ => "#### ",
-                };
-                push_wrapped(&mut lines, &format!("{prefix}{text}"), style, width);
-            }
-            Block::Paragraph { spans } => {
-                layout_spans(&mut lines, spans, Style::Normal, width, &mut link_order, "");
-            }
-            Block::ListItem { spans, index } => {
-                let prefix = if *index > 0 {
-                    format!("{index}. ")
-                } else {
-                    "• ".into()
-                };
-                layout_spans(
-                    &mut lines,
-                    spans,
-                    Style::Normal,
-                    width,
-                    &mut link_order,
-                    &prefix,
-                );
-            }
-            Block::Pre { text } => {
-                push_box(
-                    &mut lines,
-                    None,
-                    &text
-                        .lines()
-                        .map(|l| vec![Segment::Text {
-                            text: l.to_string(),
-                            style: Style::Pre,
-                        }])
-                        .collect::<Vec<_>>(),
-                    width,
-                    Style::Pre,
-                );
-            }
-            Block::Quote { spans } => {
-                layout_spans(&mut lines, spans, Style::Quote, width, &mut link_order, "│ ");
-            }
-            Block::Hr => {
-                let rule = "─".repeat(width.min(48));
-                lines.push(line_text(rule, Style::Border));
-            }
-            Block::Spacer => {
-                lines.push(line_text(String::new(), Style::Normal));
-            }
-            Block::Image { alt, src, .. } => {
-                let cache = crate::image_cache::get_image_cache();
-                let cols = (width as u16).min(60);
-                if let Some(spans_lines) = cache.get_rendered_spans(src, cols) {
-                    for col_spans in spans_lines {
-                        lines.push(LayoutLine {
-                            segments: vec![Segment::ColoredSpans { spans: col_spans }],
-                        });
-                    }
-                } else if let Some(dyn_img) = cache.get_mem_image(src) {
-                    let rendered_lines = crate::render_engine::render_image_to_lines(
-                        &dyn_img,
-                        cols,
-                        mode,
-                    );
-                    let mut spans_matrix = Vec::with_capacity(rendered_lines.len());
-                    for rline in rendered_lines {
-                        let mut col_spans = Vec::new();
-                        for span in rline.spans {
-                            let fg_rgb = match span.style.fg {
-                                Some(ratatui::style::Color::Rgb(r, g, b)) => (r, g, b),
-                                _ => (200, 200, 200),
-                            };
-                            let bg_rgb = match span.style.bg {
-                                Some(ratatui::style::Color::Rgb(r, g, b)) => (r, g, b),
-                                _ => (13, 13, 16),
-                            };
-                            col_spans.push(ColoredSpan {
-                                text: span.content.to_string(),
-                                fg_rgb,
-                                bg_rgb,
-                            });
-                        }
-                        lines.push(LayoutLine {
-                            segments: vec![Segment::ColoredSpans { spans: col_spans.clone() }],
-                        });
-                        spans_matrix.push(col_spans);
-                    }
-                    cache.put_rendered_spans(src, cols, spans_matrix);
-                } else {
-                    let label = if alt.is_empty() {
-                        if src.is_empty() {
-                            "[ image ]".into()
-                        } else {
-                            format!("[ img: {src} ]")
-                        }
-                    } else {
-                        format!("[ img: {alt} ]")
-                    };
-                    push_wrapped(&mut lines, &label, Style::Image, width);
-                }
-            }
-            Block::Caption { text } => {
-                push_wrapped(&mut lines, &format!("  {text}"), Style::Dim, width);
-            }
-            Block::Table { headers, rows } => {
-                layout_table(&mut lines, headers, rows, width);
-            }
-            Block::Frame { title, lines: inner } => {
-                let mut body: Vec<Vec<Segment>> = Vec::new();
-                for spans in inner {
-                    let mut segs = Vec::new();
-                    spans_to_segments(spans, &mut segs, &mut link_order);
-                    if segs.is_empty() {
-                        segs.push(Segment::Text {
-                            text: String::new(),
-                            style: Style::Normal,
-                        });
-                    }
-                    for wrapped in wrap_segments(&segs, width.saturating_sub(4).max(8)) {
-                        body.push(wrapped);
-                    }
-                }
-                push_box(&mut lines, title.as_deref(), &body, width, Style::Border);
-            }
+    let mut y = 0;
+    while y + 1 < row_count {
+        let top_row = &matrix[y];
+        let bot_row = &matrix[y + 1];
+
+        let mut spans = Vec::with_capacity(top_row.len());
+        for x in 0..top_row.len() {
+            let (top_r, top_g, top_b) = blend_pixel(top_row[x]);
+            let (bot_r, bot_g, bot_b) = blend_pixel(bot_row[x]);
+
+            let fg = Color::Rgb(top_r, top_g, top_b);
+            let bg = Color::Rgb(bot_r, bot_g, bot_b);
+
+            spans.push(Span::styled(
+                "▀",
+                Style::default().fg(fg).bg(bg),
+            ));
         }
+        lines.push(Line::from(spans));
+        y += 2;
     }
+    lines
+}
 
-    Layout {
-        width: width as u16,
-        lines,
-        link_order,
+fn blend_pixel(px: crate::image_decoder::RgbaPixel) -> (u8, u8, u8) {
+    let a = px.a as u16;
+    if a == 255 {
+        (px.r, px.g, px.b)
+    } else if a == 0 {
+        (13, 13, 16)
+    } else {
+        let r = ((px.r as u16 * a + 13 * (255 - a)) / 255) as u8;
+        let g = ((px.g as u16 * a + 13 * (255 - a)) / 255) as u8;
+        let b = ((px.b as u16 * a + 13 * (255 - a)) / 255) as u8;
+        (r, g, b)
     }
 }
 ```
