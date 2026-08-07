@@ -80,6 +80,19 @@ Google often blocks non-browser clients. We use **basic HTML** (`gbv=1`) only â€
 | Engine | HTML parse | **Custom structure** | Chromium/WebKit |
 | Speed | Fast | **Fast by default** | Heavy |
 
+## Contributing
+
+Contributions are welcome!
+
+1. Fork & clone the repository.
+2. Build and check locally:
+   ```bash
+   cargo check
+   cargo run --release -- https://example.com
+   ```
+3. Create a pull request or push your commits.
+
 ## License
 
 MIT
+
