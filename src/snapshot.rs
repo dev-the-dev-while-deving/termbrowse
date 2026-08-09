@@ -58,6 +58,11 @@ fn lines_to_text(layout: &Layout) -> String {
             match seg {
                 Segment::Text { text, .. } => out.push_str(text),
                 Segment::Link { text, .. } => out.push_str(text),
+                Segment::ColoredSpans { spans } => {
+                    for s in spans {
+                        out.push_str(&s.text);
+                    }
+                }
             }
         }
         out.push('\n');

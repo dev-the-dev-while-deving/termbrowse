@@ -19,6 +19,7 @@ pub struct Theme {
     pub quote: Color,
     pub border: Color,
     pub success: Color,
+    #[allow(dead_code)]
     pub warn: Color,
 }
 

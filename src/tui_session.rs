@@ -11,7 +11,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use std::time::Duration;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Focus {
     /// Centered page search (Google-style).
     Search,
@@ -19,6 +19,9 @@ enum Focus {
     Content,
     /// `:` open URL bar at bottom.
     OpenUrl,
+    /// Full-screen image modal inspection overlay.
+    #[allow(dead_code)]
+    ModalImage { url: String, mode: crate::render_engine::RenderMode },
 }
 
 pub struct App {
@@ -29,21 +32,22 @@ pub struct App {
     selected_link: usize,
     status: String,
     width: u16,
+    pub height: u16,
     focus: Focus,
-    /// Query typed into the page search form.
     search_buf: String,
-    /// Bottom open-url buffer when Focus::OpenUrl.
     open_buf: String,
+    render_mode: crate::render_engine::RenderMode,
+    pub pending_nav: Option<String>,
+    img_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 impl App {
-    pub async fn open(url: &str) -> Result<Self> {
+    pub async fn open(url: &str, render_mode: crate::render_engine::RenderMode) -> Result<Self> {
         let mut session = Session::new();
         let page = session.open(url).await?;
         let theme = Theme::groknight();
         let status = status_for(page);
         let focus = if page.doc.is_search_home() || page.doc.primary_search().is_some() {
-            // Prefer search when a form exists; center layout when search-home.
             Focus::Search
         } else {
             Focus::Content
@@ -60,9 +64,13 @@ impl App {
             selected_link: 0,
             status,
             width: 80,
+            height: 30,
             focus,
             search_buf: String::new(),
             open_buf: String::new(),
+            render_mode,
+            pending_nav: None,
+            img_tx: None,
         };
         app.relayout(80);
         Ok(app)
@@ -82,12 +90,15 @@ impl App {
             self.focus = Focus::Content;
         }
         self.relayout(self.width);
+        if let Some(ref tx) = self.img_tx {
+            spawn_image_fetcher(self.doc(), tx);
+        }
     }
 
     fn relayout(&mut self, width: u16) {
         self.width = width;
         let content_w = width.saturating_sub(4).max(20);
-        self.layout = layout::layout_document(self.doc(), content_w);
+        self.layout = layout::layout_document(self.doc(), content_w, self.render_mode);
         self.clamp_scroll(0);
     }
 
@@ -190,39 +201,194 @@ fn status_for(page: &crate::session::LoadedPage) -> String {
     )
 }
 
-pub async fn run(url: &str) -> Result<()> {
+pub async fn run(url: &str, render_mode: crate::render_engine::RenderMode) -> Result<()> {
     let mut terminal = ratatui::init();
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
     let size = terminal.size().unwrap_or(Size {
         width: 100,
         height: 30,
     });
 
-    let mut app = match App::open(url).await {
+    let mut app = match App::open(url, render_mode).await {
         Ok(mut a) => {
+            a.height = size.height;
             a.relayout(size.width);
             a
         }
         Err(e) => {
+            let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
             ratatui::restore();
             return Err(e);
         }
     };
 
     let result = event_loop(&mut terminal, &mut app).await;
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
     result
 }
 
+fn spawn_image_fetcher(
+    doc: &Document,
+    tx: &tokio::sync::mpsc::UnboundedSender<String>,
+) {
+    let mut image_urls = Vec::new();
+    for b in &doc.blocks {
+        if let crate::model::Block::Image { src, .. } = b {
+            if !src.is_empty() && (src.starts_with("http://") || src.starts_with("https://")) {
+                image_urls.push(src.clone());
+            }
+        }
+    }
+
+    if image_urls.is_empty() {
+        return;
+    }
+
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let cache = crate::image_cache::get_image_cache();
+        for url in image_urls {
+            let mut dyn_img_opt = cache.get_mem_image(&url);
+
+            if dyn_img_opt.is_none() {
+                if let Some(disk_bytes) = cache.get_disk_bytes(&url) {
+                    if let Ok(decoded) = crate::image_decoder::decode_image_bytes(&disk_bytes) {
+                        cache.put_mem_image(&url, decoded.clone());
+                        dyn_img_opt = Some(decoded);
+                    }
+                }
+            }
+
+            if dyn_img_opt.is_none() {
+                if let Ok(fetched) = crate::fetch::fetch_image(&url).await {
+                    if let Ok(decoded) = crate::image_decoder::decode_image_bytes(&fetched.bytes) {
+                        cache.put_disk_bytes(&url, &fetched.bytes);
+                        cache.put_mem_image(&url, decoded.clone());
+                        dyn_img_opt = Some(decoded);
+                    }
+                }
+            }
+
+            if dyn_img_opt.is_some() {
+                let _ = tx.send(url);
+            }
+        }
+    });
+}
+
+fn handle_mouse(mouse: crossterm::event::MouseEvent, app: &mut App) {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    match mouse.kind {
+        MouseEventKind::ScrollDown => {
+            let view_h = app.height.saturating_sub(3);
+            let max_scroll = app.layout.lines.len().saturating_sub(view_h as usize) as u16;
+            app.scroll = (app.scroll + 3).min(max_scroll);
+        }
+        MouseEventKind::ScrollUp => {
+            app.scroll = app.scroll.saturating_sub(3);
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            let content_top = 1;
+            let content_bottom = app.height.saturating_sub(2);
+            if mouse.row < content_top || mouse.row >= content_bottom {
+                return;
+            }
+            let layout_row = (mouse.row - content_top) as usize + app.scroll as usize;
+            if layout_row >= app.layout.lines.len() {
+                return;
+            }
+            let line = &app.layout.lines[layout_row];
+            let seg_col = mouse.column.saturating_sub(2);
+            let mut offset = 0u16;
+
+            for seg in &line.segments {
+                let seg_width = match seg {
+                    Segment::Text { text, .. } => unicode_width::UnicodeWidthStr::width(text.as_str()) as u16,
+                    Segment::Link { text, .. } => unicode_width::UnicodeWidthStr::width(text.as_str()) as u16,
+                    Segment::ColoredSpans { spans } => {
+                        spans.iter().map(|s| unicode_width::UnicodeWidthStr::width(s.text.as_str()) as u16).sum()
+                    }
+                };
+                if seg_col >= offset && seg_col < offset + seg_width {
+                    if let Segment::Link { r#ref, .. } = seg {
+                        if let Some(pos) = app.layout.link_order.iter().position(|r| r == r#ref) {
+                            app.selected_link = pos;
+                        }
+                        if let Some(link) = app.doc().resolve_link(*r#ref) {
+                            let href = app.doc().resolve_href(&link.href)
+                                .map(|u| u.to_string())
+                                .unwrap_or_else(|| link.href.clone());
+                            app.pending_nav = Some(href);
+                        }
+                    }
+                    break;
+                }
+                offset += seg_width;
+            }
+        }
+        _ => {}
+    }
+}
+
 async fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    app.img_tx = Some(tx.clone());
+    spawn_image_fetcher(app.doc(), &tx);
+
     loop {
+        if let Some(nav_url) = app.pending_nav.take() {
+            match App::open(&nav_url, app.render_mode).await {
+                Ok(mut new_app) => {
+                    new_app.img_tx = app.img_tx.clone();
+                    *app = new_app;
+                    app.relayout(terminal.size()?.width);
+                    if let Some(ref tx) = app.img_tx {
+                        spawn_image_fetcher(app.doc(), tx);
+                    }
+                }
+                Err(e) => {
+                    app.status = format!("Nav error: {e}");
+                }
+            }
+        }
+
+        let mut reflow = false;
+        while let Ok(_img_url) = rx.try_recv() {
+            reflow = true;
+        }
+        if reflow {
+            app.relayout(app.width);
+        }
+
         terminal.draw(|f| draw(f, app))?;
 
         if !event::poll(Duration::from_millis(80))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
+
+        let ev = event::read()?;
+        let Event::Key(key) = (match ev {
+            Event::Resize(cols, rows) => {
+                app.width = cols;
+                app.height = rows;
+                crate::image_cache::get_image_cache().invalidate_render_cache();
+                app.relayout(cols);
+                if let Some(ref tx) = app.img_tx {
+                    spawn_image_fetcher(app.doc(), tx);
+                }
+                continue;
+            }
+            Event::Mouse(mouse) => {
+                handle_mouse(mouse, app);
+                continue;
+            }
+            Event::Key(k) => Event::Key(k),
+            _ => continue,
+        }) else {
             continue;
         };
+
         if key.kind != KeyEventKind::Press {
             continue;
         }
@@ -232,6 +398,44 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> R
         app.clamp_scroll(view_h);
 
         match app.focus {
+            Focus::ModalImage { ref url, mode } => {
+                let url = url.clone();
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        app.focus = Focus::Content;
+                    }
+                    KeyCode::Char('m') => {
+                        let next_mode = match mode {
+                            crate::render_engine::RenderMode::HalfBlock => {
+                                crate::render_engine::RenderMode::Ascii
+                            }
+                            crate::render_engine::RenderMode::Ascii => {
+                                crate::render_engine::RenderMode::Braille
+                            }
+                            _ => crate::render_engine::RenderMode::HalfBlock,
+                        };
+                        app.focus = Focus::ModalImage {
+                            url,
+                            mode: next_mode,
+                        };
+                    }
+                    KeyCode::Char('s') => {
+                        if let Some(bytes) = crate::image_cache::get_image_cache().get_disk_bytes(&url) {
+                            let _ = std::fs::create_dir_all("downloads");
+                            let ts = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let filename = format!("downloads/image_{ts}.png");
+                            if std::fs::write(&filename, bytes).is_ok() {
+                                app.status = format!("saved image to {filename}");
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             Focus::OpenUrl => {
                 match key.code {
                     KeyCode::Esc => {
@@ -443,11 +647,41 @@ fn draw(frame: &mut Frame, app: &App) {
         draw_centered_search(frame, app, body);
     } else {
         draw_content(frame, app, body);
-        // Compact strip when searching from a results page
         if app.focus == Focus::Search && page.doc.primary_search().is_some() {
             draw_top_search_bar(frame, app, body);
         }
     }
+
+    if let Focus::ModalImage { ref url, mode } = app.focus {
+        draw_modal_image(frame, app, area, url, mode);
+    }
+
+fn draw_modal_image(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    url: &str,
+    mode: crate::render_engine::RenderMode,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.accent))
+        .title(format!(
+            " Image Viewer [{mode:?}] — [m] mode [s] save [esc] close "
+        ));
+
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    let cache = crate::image_cache::get_image_cache();
+    if let Some(dyn_img) = cache.get_mem_image(url) {
+        let lines = crate::render_engine::render_image_to_lines(&dyn_img, inner.width, mode);
+        frame.render_widget(Paragraph::new(lines), inner);
+    } else {
+        frame.render_widget(Paragraph::new("Loading image pixels..."), inner);
+    }
+}
 
     // Status
     let link_info = match app.selected_ref().and_then(|r| app.doc().resolve_link(r)) {
@@ -474,7 +708,7 @@ fn draw(frame: &mut Frame, app: &App) {
                 format!(" > search: {}█", app.search_buf)
             }
         }
-        Focus::Content => format!(" > {}{}", app.status, link_info),
+        Focus::Content | Focus::ModalImage { .. } => format!(" > {}{}", app.status, link_info),
     };
 
     let help = match app.focus {
@@ -483,6 +717,7 @@ fn draw(frame: &mut Frame, app: &App) {
         Focus::Content => {
             " j/k scroll · tab links · enter open · / search · [ ] history · o url · q "
         }
+        Focus::ModalImage { .. } => " m toggle render mode · s save image to disk · esc close ",
     };
 
     frame.render_widget(
@@ -648,6 +883,18 @@ fn draw_content(frame: &mut Frame, app: &App, area: Rect) {
                     let active = Some(*r#ref) == selected;
                     spans.push(Span::styled(text.clone(), th.link(active)));
                 }
+                Segment::ColoredSpans { spans: col_spans } => {
+                    for cspan in col_spans {
+                        let (fr, fg, fb) = cspan.fg_rgb;
+                        let (br, bg, bb) = cspan.bg_rgb;
+                        spans.push(Span::styled(
+                            cspan.text.clone(),
+                            Style::default()
+                                .fg(Color::Rgb(fr, fg, fb))
+                                .bg(Color::Rgb(br, bg, bb)),
+                        ));
+                    }
+                }
             }
         }
         if spans.len() == 2 {
@@ -702,4 +949,36 @@ fn truncate(s: &str, max: usize) -> String {
         out.push(ch);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{MouseEvent, MouseEventKind};
+
+    #[tokio::test]
+    async fn test_mouse_scrolling() {
+        let mut app = App::open("https://example.com", crate::render_engine::RenderMode::HalfBlock)
+            .await
+            .unwrap();
+        app.height = 30;
+        assert_eq!(app.scroll, 0);
+
+        let scroll_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(scroll_down, &mut app);
+
+        let scroll_up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(scroll_up, &mut app);
+        assert_eq!(app.scroll, 0);
+    }
 }
