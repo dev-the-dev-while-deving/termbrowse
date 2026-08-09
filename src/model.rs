@@ -184,7 +184,7 @@ impl Document {
             for (k, v) in &pairs {
                 // only keep q for rewritten engines
                 if host.contains("google.") || host.contains("bing.") {
-                    if k == "q" || k == form.query_param {
+                    if k == "q" || *k == form.query_param {
                         ser.append_pair("q", v);
                     }
                 } else {
