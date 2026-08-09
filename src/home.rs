@@ -40,18 +40,15 @@ impl Default for HomeData {
 }
 
 fn default_favorites() -> Vec<Bookmark> {
+    // Prefer sites that work in a terminal (no CAPTCHA walls).
     vec![
         Bookmark {
-            title: "Example".into(),
-            url: "https://example.com".into(),
+            title: "Search".into(),
+            url: "https://html.duckduckgo.com/html/".into(),
         },
         Bookmark {
             title: "Rust Book".into(),
             url: "https://doc.rust-lang.org/book/".into(),
-        },
-        Bookmark {
-            title: "DuckDuckGo".into(),
-            url: "https://html.duckduckgo.com/html/".into(),
         },
         Bookmark {
             title: "MDN".into(),
@@ -64,6 +61,10 @@ fn default_favorites() -> Vec<Bookmark> {
         Bookmark {
             title: "Wikipedia".into(),
             url: "https://en.wikipedia.org/".into(),
+        },
+        Bookmark {
+            title: "Example".into(),
+            url: "https://example.com".into(),
         },
     ]
 }
