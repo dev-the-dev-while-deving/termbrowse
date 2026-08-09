@@ -1,13 +1,16 @@
-# termbrowse
+# termbrowse / PrivSearch
 
-**Custom interactive web for the terminal** — no headless Chrome, no screenshot paint.
+**Ad-free privacy search + interactive web for the terminal** — no headless Chrome, no screenshot paint.
 
 ```
-URL → HTTPS fetch → HTML parse → blocks + forms + links → Grok-density TUI
+query → partner fetch → re-rank → PrivSearch results (CLI / TUI next)
+URL   → HTTPS fetch → HTML parse → blocks + forms + links → Grok-density TUI
                                                       ↘ agent JSON snapshot
 ```
 
 A **session** (history, click links, type search), not a one-shot scraper dump and not a graphical browser.
+
+**PrivSearch (parked):** full product brief → [`docs/PRIVSEARCH.md`](docs/PRIVSEARCH.md) — resume after termbrowse is completely functional.
 
 ## Stack (all custom)
 
@@ -43,13 +46,24 @@ Not a 1:1 browser paint — same *kinds* of elements, terminal treatment:
 ## Quick start
 
 ```bash
+# PrivSearch (ranked results — default partner: DuckDuckGo HTML)
+cargo run --release -- search "rust async"
+cargo run --release -- search -n 5 --json "privacy search engine"
+PRIVSEARCH_PROVIDER=mock cargo run --release -- search "demo"
+
+# Structure browser
 cargo run --release -- https://example.com
 cargo run --release -- https://doc.rust-lang.org/book/
-cargo run --release -- https://html.duckduckgo.com/html/
 
 # Agent
 cargo run --release -- snapshot https://example.com
 ```
+
+### PrivSearch env
+
+| Variable | Values | Default |
+|----------|--------|---------|
+| `PRIVSEARCH_PROVIDER` | `ddg`, `mock` | `ddg` |
 
 ### Keys
 

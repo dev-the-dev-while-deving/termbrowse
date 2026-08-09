@@ -1,6 +1,6 @@
-//! Grok-density session TUI — structure blocks, accent rails, centered search.
-//! Search homes (Google, …) show a middle prompt box like Grok Build's input.
+//! Grok-density session TUI + Safari-style start page (Favorites + Reading List).
 
+use crate::home::{Bookmark, HomeData, ReadingItem};
 use crate::layout::{self, Layout as DocLayout, Segment, Style as LayStyle};
 use crate::model::{Document, Ref};
 use crate::session::Session;
@@ -12,16 +12,54 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Screen {
+    Home,
+    Browse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HomeSection {
+    Favorites,
+    ReadingList,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
-    /// Centered page search (Google-style).
     Search,
-    /// Scroll content / links.
     Content,
-    /// `:` open URL bar at bottom.
     OpenUrl,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditField {
+    Title,
+    Url,
+}
+
+#[derive(Debug, Clone)]
+enum EditKind {
+    AddFavorite,
+    EditFavorite(usize),
+    AddReading,
+    EditReading(usize),
+}
+
+#[derive(Debug, Clone)]
+struct EditState {
+    kind: EditKind,
+    title: String,
+    url: String,
+    field: EditField,
+}
+
 pub struct App {
+    screen: Screen,
+    home: HomeData,
+    home_section: HomeSection,
+    fav_idx: usize,
+    read_idx: usize,
+    edit: Option<EditState>,
+
     session: Session,
     theme: Theme,
     layout: DocLayout,
@@ -30,27 +68,22 @@ pub struct App {
     status: String,
     width: u16,
     focus: Focus,
-    /// Query typed into the page search form.
     search_buf: String,
-    /// Bottom open-url buffer when Focus::OpenUrl.
     open_buf: String,
 }
 
 impl App {
-    pub async fn open(url: &str) -> Result<Self> {
-        let mut session = Session::new();
-        let page = session.open(url).await?;
-        let theme = Theme::groknight();
-        let status = status_for(page);
-        let focus = if page.doc.is_search_home() || page.doc.primary_search().is_some() {
-            // Prefer search when a form exists; center layout when search-home.
-            Focus::Search
-        } else {
-            Focus::Content
-        };
-        let mut app = Self {
-            session,
-            theme,
+    pub fn home() -> Self {
+        let home = HomeData::load();
+        Self {
+            screen: Screen::Home,
+            home,
+            home_section: HomeSection::Favorites,
+            fav_idx: 0,
+            read_idx: 0,
+            edit: None,
+            session: Session::new(),
+            theme: Theme::groknight(),
             layout: DocLayout {
                 width: 0,
                 lines: vec![],
@@ -58,36 +91,80 @@ impl App {
             },
             scroll: 0,
             selected_link: 0,
-            status,
+            status: format!(
+                "Start Page · {} favorites · {} reading · a add · e edit · d del · enter open",
+                0, 0
+            ),
             width: 80,
-            focus,
+            focus: Focus::Content,
             search_buf: String::new(),
             open_buf: String::new(),
-        };
-        app.relayout(80);
+        }
+        .with_home_status()
+    }
+
+    pub async fn open_url(url: &str) -> Result<Self> {
+        let mut app = Self::home();
+        app.go(url).await?;
         Ok(app)
     }
 
-    fn doc(&self) -> &Document {
-        &self.session.current().expect("session has page").doc
+    fn with_home_status(mut self) -> Self {
+        self.refresh_home_status();
+        self
+    }
+
+    fn refresh_home_status(&mut self) {
+        self.status = format!(
+            "Start Page · {} favorites · {} reading · tab section · a add · e edit · d del · enter open · o url",
+            self.home.favorites.len(),
+            self.home.reading_list.len()
+        );
+    }
+
+    fn persist_home(&mut self) {
+        if let Err(e) = self.home.save() {
+            self.status = format!("save failed: {e:#}");
+        } else {
+            self.refresh_home_status();
+        }
+    }
+
+    fn go_home(&mut self) {
+        self.screen = Screen::Home;
+        self.edit = None;
+        self.refresh_home_status();
+    }
+
+    fn doc(&self) -> Option<&Document> {
+        self.session.current().map(|p| &p.doc)
     }
 
     fn after_nav(&mut self) {
+        self.screen = Screen::Browse;
         self.scroll = 0;
         self.selected_link = 0;
         self.search_buf.clear();
-        if self.doc().is_search_home() || self.doc().primary_search().is_some() {
-            self.focus = Focus::Search;
-        } else {
-            self.focus = Focus::Content;
+        if let Some(doc) = self.doc() {
+            if doc.is_search_home() || doc.primary_search().is_some() {
+                self.focus = Focus::Search;
+            } else {
+                self.focus = Focus::Content;
+            }
         }
         self.relayout(self.width);
     }
 
     fn relayout(&mut self, width: u16) {
         self.width = width;
+        if self.screen != Screen::Browse {
+            return;
+        }
+        let Some(doc) = self.doc() else {
+            return;
+        };
         let content_w = width.saturating_sub(4).max(20);
-        self.layout = layout::layout_document(self.doc(), content_w);
+        self.layout = layout::layout_document(doc, content_w);
         self.clamp_scroll(0);
     }
 
@@ -103,11 +180,14 @@ impl App {
     }
 
     async fn navigate_selected(&mut self) -> Result<()> {
+        let Some(doc) = self.doc() else {
+            return Ok(());
+        };
         let Some(r) = self.selected_ref() else {
             self.status = "no link selected — tab to pick".into();
             return Ok(());
         };
-        let href = match self.doc().resolve_link(r) {
+        let href = match doc.resolve_link(r) {
             Some(l) => l.href.clone(),
             None => {
                 self.status = "link gone".into();
@@ -135,15 +215,17 @@ impl App {
             self.status = "type a query first".into();
             return Ok(());
         }
-        let Some(url) = self.doc().search_url(&q) else {
+        let Some(doc) = self.doc() else {
+            return Ok(());
+        };
+        let Some(url) = doc.search_url(&q) else {
             self.status = "no search form on this page".into();
             return Ok(());
         };
-        self.status = format!("searching…");
+        self.status = "searching…".into();
         let page = self.session.open(&url).await?;
         self.status = status_for(page);
         self.after_nav();
-        // After results: keep search buffer with query, focus content to browse hits.
         self.search_buf = q;
         self.focus = Focus::Content;
         Ok(())
@@ -162,7 +244,7 @@ impl App {
             self.status = status_for(page);
             self.after_nav();
         } else {
-            self.status = "no history back".into();
+            self.go_home();
         }
     }
 
@@ -174,20 +256,182 @@ impl App {
             self.status = "no history forward".into();
         }
     }
+
+    fn fav_cols(&self, width: u16) -> usize {
+        let usable = width.saturating_sub(4) as usize;
+        let tile = 16usize;
+        (usable / tile).clamp(2, 6)
+    }
+
+    fn open_selected_home(&mut self) -> Option<String> {
+        match self.home_section {
+            HomeSection::Favorites => self
+                .home
+                .favorites
+                .get(self.fav_idx)
+                .map(|b| b.url.clone()),
+            HomeSection::ReadingList => self
+                .home
+                .reading_list
+                .get(self.read_idx)
+                .map(|r| r.url.clone()),
+        }
+    }
+
+    fn start_add(&mut self) {
+        let kind = match self.home_section {
+            HomeSection::Favorites => EditKind::AddFavorite,
+            HomeSection::ReadingList => EditKind::AddReading,
+        };
+        self.edit = Some(EditState {
+            kind,
+            title: String::new(),
+            url: String::new(),
+            field: EditField::Title,
+        });
+        self.status = "add · tab field · enter save · esc cancel".into();
+    }
+
+    fn start_edit(&mut self) {
+        match self.home_section {
+            HomeSection::Favorites => {
+                if let Some(f) = self.home.favorites.get(self.fav_idx) {
+                    self.edit = Some(EditState {
+                        kind: EditKind::EditFavorite(self.fav_idx),
+                        title: f.title.clone(),
+                        url: f.url.clone(),
+                        field: EditField::Title,
+                    });
+                }
+            }
+            HomeSection::ReadingList => {
+                if let Some(r) = self.home.reading_list.get(self.read_idx) {
+                    self.edit = Some(EditState {
+                        kind: EditKind::EditReading(self.read_idx),
+                        title: r.title.clone(),
+                        url: r.url.clone(),
+                        field: EditField::Title,
+                    });
+                }
+            }
+        }
+        if self.edit.is_some() {
+            self.status = "edit · tab field · enter save · esc cancel".into();
+        }
+    }
+
+    fn delete_selected(&mut self) {
+        match self.home_section {
+            HomeSection::Favorites => {
+                if self.home.favorites.is_empty() {
+                    return;
+                }
+                self.home.remove_favorite(self.fav_idx);
+                if self.fav_idx > 0 && self.fav_idx >= self.home.favorites.len() {
+                    self.fav_idx = self.home.favorites.len().saturating_sub(1);
+                }
+            }
+            HomeSection::ReadingList => {
+                if self.home.reading_list.is_empty() {
+                    return;
+                }
+                self.home.remove_reading(self.read_idx);
+                if self.read_idx > 0 && self.read_idx >= self.home.reading_list.len() {
+                    self.read_idx = self.home.reading_list.len().saturating_sub(1);
+                }
+            }
+        }
+        self.persist_home();
+        self.status = "deleted".into();
+    }
+
+    fn commit_edit(&mut self) {
+        let Some(ed) = self.edit.take() else {
+            return;
+        };
+        let title = ed.title.trim().to_string();
+        let url = ed.url.trim().to_string();
+        if title.is_empty() || url.is_empty() {
+            self.status = "title and url required".into();
+            self.edit = Some(ed);
+            return;
+        }
+        let url = if url.starts_with("http://") || url.starts_with("https://") {
+            url
+        } else {
+            format!("https://{url}")
+        };
+        match ed.kind {
+            EditKind::AddFavorite => self.home.add_favorite(title, url),
+            EditKind::EditFavorite(i) => self.home.update_favorite(i, title, url),
+            EditKind::AddReading => self.home.add_reading(title, url),
+            EditKind::EditReading(i) => {
+                if let Some(item) = self.home.reading_list.get_mut(i) {
+                    item.title = title;
+                    item.url = url;
+                }
+            }
+        }
+        self.persist_home();
+        self.status = "saved".into();
+    }
+
+    fn add_current_to_favorites(&mut self) {
+        let Some(doc) = self.doc() else {
+            self.status = "nothing to bookmark".into();
+            return;
+        };
+        let title = if doc.title.is_empty() {
+            doc.url.clone()
+        } else {
+            doc.title.clone()
+        };
+        self.home.add_favorite(title, doc.url.clone());
+        self.persist_home();
+        self.status = "added to Favorites".into();
+    }
+
+    fn add_current_to_reading(&mut self) {
+        let Some(doc) = self.doc() else {
+            self.status = "nothing to save".into();
+            return;
+        };
+        let title = if doc.title.is_empty() {
+            doc.url.clone()
+        } else {
+            doc.title.clone()
+        };
+        self.home.add_reading(title, doc.url.clone());
+        self.persist_home();
+        self.status = "saved to Reading List".into();
+    }
 }
 
 fn status_for(page: &crate::session::LoadedPage) -> String {
-    let _ = page.source;
     let search = if page.doc.primary_search().is_some() {
         " · / search"
     } else {
         ""
     };
     format!(
-        "custom · {}ms · {} links{search} · [ ] history · tab links · q quit",
+        "custom · {}ms · {} links{search} · H home · f favorite · s reading list · q quit",
         page.total_ms,
         page.doc.links.len()
     )
+}
+
+pub async fn run_home() -> Result<()> {
+    let mut terminal = ratatui::init();
+    let size = terminal.size().unwrap_or(Size {
+        width: 100,
+        height: 30,
+    });
+    let mut app = App::home();
+    app.width = size.width;
+    app.refresh_home_status();
+    let result = event_loop(&mut terminal, &mut app).await;
+    ratatui::restore();
+    result
 }
 
 pub async fn run(url: &str) -> Result<()> {
@@ -196,9 +440,9 @@ pub async fn run(url: &str) -> Result<()> {
         width: 100,
         height: 30,
     });
-
-    let mut app = match App::open(url).await {
+    let mut app = match App::open_url(url).await {
         Ok(mut a) => {
+            a.width = size.width;
             a.relayout(size.width);
             a
         }
@@ -207,7 +451,6 @@ pub async fn run(url: &str) -> Result<()> {
             return Err(e);
         }
     };
-
     let result = event_loop(&mut terminal, &mut app).await;
     ratatui::restore();
     result
@@ -229,8 +472,128 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> R
 
         let height = terminal.size()?.height;
         let view_h = height.saturating_sub(3);
-        app.clamp_scroll(view_h);
+        let width = terminal.size()?.width;
+        app.width = width;
 
+        // ── Edit modal ──
+        if let Some(ed) = app.edit.as_mut() {
+            match key.code {
+                KeyCode::Esc => {
+                    app.edit = None;
+                    app.refresh_home_status();
+                }
+                KeyCode::Tab | KeyCode::BackTab => {
+                    ed.field = match ed.field {
+                        EditField::Title => EditField::Url,
+                        EditField::Url => EditField::Title,
+                    };
+                }
+                KeyCode::Enter => {
+                    app.commit_edit();
+                }
+                KeyCode::Backspace => match ed.field {
+                    EditField::Title => {
+                        ed.title.pop();
+                    }
+                    EditField::Url => {
+                        ed.url.pop();
+                    }
+                },
+                KeyCode::Char(c) if !c.is_control() => match ed.field {
+                    EditField::Title => ed.title.push(c),
+                    EditField::Url => ed.url.push(c),
+                },
+                _ => {}
+            }
+            continue;
+        }
+
+        // ── Home screen ──
+        if app.screen == Screen::Home {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => break,
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                KeyCode::Tab => {
+                    app.home_section = match app.home_section {
+                        HomeSection::Favorites => HomeSection::ReadingList,
+                        HomeSection::ReadingList => HomeSection::Favorites,
+                    };
+                    app.refresh_home_status();
+                }
+                KeyCode::Left | KeyCode::Char('h') if app.home_section == HomeSection::Favorites => {
+                    if app.fav_idx > 0 {
+                        app.fav_idx -= 1;
+                    }
+                }
+                KeyCode::Right | KeyCode::Char('l')
+                    if app.home_section == HomeSection::Favorites =>
+                {
+                    if app.fav_idx + 1 < app.home.favorites.len() {
+                        app.fav_idx += 1;
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => match app.home_section {
+                    HomeSection::Favorites => {
+                        let cols = app.fav_cols(width);
+                        app.fav_idx = app.fav_idx.saturating_sub(cols);
+                    }
+                    HomeSection::ReadingList => {
+                        app.read_idx = app.read_idx.saturating_sub(1);
+                    }
+                },
+                KeyCode::Down | KeyCode::Char('j') => match app.home_section {
+                    HomeSection::Favorites => {
+                        let cols = app.fav_cols(width);
+                        if app.fav_idx + cols < app.home.favorites.len() {
+                            app.fav_idx += cols;
+                        } else if !app.home.favorites.is_empty() {
+                            app.fav_idx = app.home.favorites.len() - 1;
+                        }
+                    }
+                    HomeSection::ReadingList => {
+                        if app.read_idx + 1 < app.home.reading_list.len() {
+                            app.read_idx += 1;
+                        }
+                    }
+                },
+                KeyCode::Enter => {
+                    if let Some(url) = app.open_selected_home() {
+                        if let Err(e) = app.go(&url).await {
+                            app.status = format!("error: {e:#}");
+                        }
+                    }
+                }
+                KeyCode::Char('a') => app.start_add(),
+                KeyCode::Char('e') => app.start_edit(),
+                KeyCode::Char('d') | KeyCode::Backspace | KeyCode::Delete => {
+                    app.delete_selected();
+                }
+                KeyCode::Char('o') | KeyCode::Char(':') => {
+                    app.focus = Focus::OpenUrl;
+                    app.open_buf.clear();
+                    app.screen = Screen::Browse; // reuse open-url draw path via status
+                    // Stay on home visually — handle open url on home
+                    app.screen = Screen::Home;
+                    app.edit = Some(EditState {
+                        kind: EditKind::AddFavorite,
+                        title: "New".into(),
+                        url: String::new(),
+                        field: EditField::Url,
+                    });
+                    app.status = "open/add · type url · enter".into();
+                }
+                KeyCode::Char('/') => {
+                    // Jump to DDG search home
+                    if let Err(e) = app.go("https://html.duckduckgo.com/html/").await {
+                        app.status = format!("error: {e:#}");
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        // ── Browse screen ──
         match app.focus {
             Focus::OpenUrl => {
                 match key.code {
@@ -252,7 +615,7 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> R
                     KeyCode::Backspace => {
                         app.open_buf.pop();
                     }
-                    KeyCode::Char(c) => app.open_buf.push(c),
+                    KeyCode::Char(c) if !c.is_control() => app.open_buf.push(c),
                     _ => {}
                 }
                 continue;
@@ -260,7 +623,9 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> R
             Focus::Search => {
                 match key.code {
                     KeyCode::Esc => {
-                        if !app.doc().is_search_home() {
+                        if app.doc().map(|d| d.is_search_home()).unwrap_or(false) {
+                            // stay
+                        } else {
                             app.focus = Focus::Content;
                         }
                     }
@@ -272,15 +637,12 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> R
                     KeyCode::Backspace => {
                         app.search_buf.pop();
                     }
-                    KeyCode::Tab => {
-                        app.focus = Focus::Content;
-                    }
+                    KeyCode::Tab => app.focus = Focus::Content,
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                    KeyCode::Char('H') => app.go_home(),
                     KeyCode::Char('[') => app.back(),
                     KeyCode::Char(']') => app.forward(),
-                    KeyCode::Char(c) if !c.is_control() => {
-                        app.search_buf.push(c);
-                    }
+                    KeyCode::Char(c) if !c.is_control() => app.search_buf.push(c),
                     _ => {}
                 }
                 continue;
@@ -289,14 +651,20 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> R
         }
 
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => break,
+            KeyCode::Char('q') => break,
+            KeyCode::Esc => {
+                app.go_home();
+            }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+            KeyCode::Char('H') => app.go_home(),
+            KeyCode::Char('f') => app.add_current_to_favorites(),
+            KeyCode::Char('s') => app.add_current_to_reading(),
             KeyCode::Char('/') | KeyCode::Char('i') => {
-                if app.doc().primary_search().is_some() {
+                if app.doc().and_then(|d| d.primary_search()).is_some() {
                     app.focus = Focus::Search;
                     app.status = "search — type query, enter to go".into();
                 } else {
-                    app.status = "no search form on this page".into();
+                    app.status = "no search form — H home or o url".into();
                 }
             }
             KeyCode::Char('j') | KeyCode::Down => {
@@ -347,7 +715,6 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> R
                     app.status = format!("reload error: {e:#}");
                 }
             }
-            KeyCode::Char('h') => app.back(),
             KeyCode::Char('[') => app.back(),
             KeyCode::Char(']') => app.forward(),
             KeyCode::Char(':') | KeyCode::Char('o') => {
@@ -365,9 +732,8 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> R
             _ => {}
         }
 
-        let w = terminal.size()?.width;
-        if w != app.width {
-            app.relayout(w);
+        if width != app.layout.width && app.screen == Screen::Browse {
+            app.relayout(width);
         }
     }
     Ok(())
@@ -406,82 +772,83 @@ fn draw(frame: &mut Frame, app: &App) {
         ])
         .split(area);
 
-    let page = app.session.current().unwrap();
-    let back = if app.session.can_back() { "◀" } else { " " };
-    let fwd = if app.session.can_forward() { "▶" } else { " " };
-    let title = Line::from(vec![
-        Span::styled(" termbrowse ", th.title_accent()),
-        Span::styled(format!(" {back}{fwd} "), th.title_bar()),
-        Span::styled(
-            format!("{} ", truncate(&page.doc.title, 40)),
-            th.title_bar().add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!(" {} ", truncate(&page.doc.url, 48)),
-            Style::new().bg(th.bg_panel).fg(th.text_dim),
-        ),
-        Span::styled(
-            " custom ",
-            Style::new().bg(th.bg_panel).fg(th.success),
-        ),
-    ]);
+    // Title
+    let title = match app.screen {
+        Screen::Home => Line::from(vec![
+            Span::styled(" termbrowse ", th.title_accent()),
+            Span::styled(" Start Page ", th.title_bar().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(
+                    " {} favorites · {} reading ",
+                    app.home.favorites.len(),
+                    app.home.reading_list.len()
+                ),
+                Style::new().bg(th.bg_panel).fg(th.text_dim),
+            ),
+        ]),
+        Screen::Browse => {
+            let page = app.session.current();
+            let (t, u) = page
+                .map(|p| (p.doc.title.as_str(), p.doc.url.as_str()))
+                .unwrap_or(("…", ""));
+            let back = if app.session.can_back() { "◀" } else { " " };
+            let fwd = if app.session.can_forward() { "▶" } else { " " };
+            Line::from(vec![
+                Span::styled(" termbrowse ", th.title_accent()),
+                Span::styled(format!(" {back}{fwd} "), th.title_bar()),
+                Span::styled(
+                    format!("{} ", truncate(t, 36)),
+                    th.title_bar().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" {} ", truncate(u, 40)),
+                    Style::new().bg(th.bg_panel).fg(th.text_dim),
+                ),
+            ])
+        }
+    };
     frame.render_widget(Paragraph::new(title).style(th.title_bar()), chunks[0]);
 
     let body = chunks[1];
-    // Fill body background
     frame.render_widget(Block::default().style(th.body_bg()), body);
 
-    // Centered Grok-style search whenever we're in Search focus with a form,
-    // or on a search-home / captcha page (default open).
-    let show_centered = app.focus == Focus::Search
-        && page.doc.primary_search().is_some()
-        && (page.doc.wants_centered_search()
-            || page.doc.is_search_home()
-            || app.search_buf.is_empty() && page.doc.links.len() < 15);
+    match app.screen {
+        Screen::Home => draw_home(frame, app, body),
+        Screen::Browse => draw_browse(frame, app, body),
+    }
 
-    if show_centered {
-        draw_centered_search(frame, app, body);
-    } else {
-        draw_content(frame, app, body);
-        // Compact strip when searching from a results page
-        if app.focus == Focus::Search && page.doc.primary_search().is_some() {
-            draw_top_search_bar(frame, app, body);
-        }
+    // Edit overlay
+    if let Some(ed) = &app.edit {
+        draw_edit_modal(frame, app, body, ed);
     }
 
     // Status
-    let link_info = match app.selected_ref().and_then(|r| app.doc().resolve_link(r)) {
-        Some(l) => format!(
-            " ◆ [{}] {} → {}",
-            l.r#ref,
-            truncate(&l.text, 28),
-            truncate(&l.href, 36)
-        ),
-        None => String::new(),
-    };
-
-    let prompt_line = match app.focus {
-        Focus::OpenUrl => format!(" > open: {}█", app.open_buf),
-        Focus::Search => {
-            let ph = page
-                .doc
-                .primary_search()
-                .map(|f| f.placeholder.as_str())
-                .unwrap_or("Search…");
-            if app.search_buf.is_empty() {
-                format!(" > search · {ph}")
-            } else {
-                format!(" > search: {}█", app.search_buf)
-            }
+    let prompt_line = if app.edit.is_some() {
+        app.status.clone()
+    } else if app.screen == Screen::Browse && app.focus == Focus::OpenUrl {
+        format!(" > open: {}█", app.open_buf)
+    } else if app.screen == Screen::Browse && app.focus == Focus::Search {
+        let ph = app
+            .doc()
+            .and_then(|d| d.primary_search())
+            .map(|f| f.placeholder.as_str())
+            .unwrap_or("Search…");
+        if app.search_buf.is_empty() {
+            format!(" > search · {ph}")
+        } else {
+            format!(" > search: {}█", app.search_buf)
         }
-        Focus::Content => format!(" > {}{}", app.status, link_info),
+    } else {
+        format!(" > {}", app.status)
     };
 
-    let help = match app.focus {
-        Focus::Search => " type query · enter search · tab content · [ ] history · q quit ",
-        Focus::OpenUrl => " type url · enter · esc cancel ",
-        Focus::Content => {
-            " j/k scroll · tab links · enter open · / search · [ ] history · o url · q "
+    let help = match (app.screen, app.edit.is_some()) {
+        (_, true) => " tab field · enter save · esc cancel ",
+        (Screen::Home, _) => {
+            " arrows move · tab section · enter open · a add · e edit · d delete · / search · q "
+        }
+        (Screen::Browse, _) => {
+            " j/k scroll · tab links · f favorite · s reading · H home · o url · q "
         }
     };
 
@@ -497,27 +864,257 @@ fn draw(frame: &mut Frame, app: &App) {
     );
 }
 
-/// Grok Build–style centered search: brand + middle prompt box (magenta accent).
+/// Safari-like start page: Favorites grid + Reading List.
+fn draw_home(frame: &mut Frame, app: &App, area: Rect) {
+    let th = &app.theme;
+    let mut y = area.y + 1;
+
+    // Section: Favorites
+    let fav_active = app.home_section == HomeSection::Favorites;
+    let fav_title = if fav_active {
+        "◆ Favorites"
+    } else {
+        "  Favorites"
+    };
+    frame.render_widget(
+        Paragraph::new(fav_title).style(
+            Style::new()
+                .fg(if fav_active { th.accent } else { th.text_dim })
+                .bg(th.bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(area.x + 2, y, area.width.saturating_sub(4), 1),
+    );
+    y += 2;
+
+    let cols = app.fav_cols(area.width) as u16;
+    let tile_w = ((area.width.saturating_sub(4)) / cols.max(1)).max(12);
+    let tile_h: u16 = 4;
+    let favs = &app.home.favorites;
+
+    if favs.is_empty() {
+        frame.render_widget(
+            Paragraph::new("  No favorites yet — press a to add").style(th.dim()),
+            Rect::new(area.x + 2, y, area.width.saturating_sub(4), 1),
+        );
+        y += 2;
+    } else {
+        for (i, fav) in favs.iter().enumerate() {
+            let row = (i as u16) / cols;
+            let col = (i as u16) % cols;
+            let x = area.x + 2 + col * tile_w;
+            let ty = y + row * (tile_h + 1);
+            if ty + tile_h > area.y + area.height.saturating_sub(8) {
+                break;
+            }
+            let selected = fav_active && i == app.fav_idx;
+            draw_fav_tile(frame, th, fav, Rect::new(x, ty, tile_w.saturating_sub(1), tile_h), selected);
+        }
+        let rows = (favs.len() as u16).div_ceil(cols);
+        y += rows * (tile_h + 1) + 1;
+    }
+
+    // Section: Reading List
+    if y + 4 < area.y + area.height {
+        let read_active = app.home_section == HomeSection::ReadingList;
+        let read_title = if read_active {
+            "◆ Reading List"
+        } else {
+            "  Reading List"
+        };
+        frame.render_widget(
+            Paragraph::new(read_title).style(
+                Style::new()
+                    .fg(if read_active { th.accent } else { th.text_dim })
+                    .bg(th.bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Rect::new(area.x + 2, y, area.width.saturating_sub(4), 1),
+        );
+        y += 2;
+
+        if app.home.reading_list.is_empty() {
+            frame.render_widget(
+                Paragraph::new("  Empty — open a page and press s to save").style(th.dim()),
+                Rect::new(area.x + 2, y, area.width.saturating_sub(4), 1),
+            );
+        } else {
+            let max_items = (area.y + area.height).saturating_sub(y + 1) as usize;
+            for (i, item) in app.home.reading_list.iter().enumerate().take(max_items) {
+                let selected = read_active && i == app.read_idx;
+                draw_reading_row(
+                    frame,
+                    th,
+                    item,
+                    Rect::new(area.x + 2, y, area.width.saturating_sub(4), 1),
+                    selected,
+                );
+                y += 1;
+            }
+        }
+    }
+}
+
+fn draw_fav_tile(frame: &mut Frame, th: &Theme, fav: &Bookmark, area: Rect, selected: bool) {
+    let border = if selected { th.accent } else { th.border };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(border).bg(th.bg_panel))
+        .style(Style::new().bg(if selected { th.bg_panel } else { th.bg }));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Icon letter
+    let letter = fav
+        .title
+        .chars()
+        .next()
+        .unwrap_or('?')
+        .to_uppercase()
+        .to_string();
+    let letter_style = Style::new()
+        .fg(th.accent)
+        .bg(if selected { th.bg_panel } else { th.bg })
+        .add_modifier(Modifier::BOLD);
+    frame.render_widget(
+        Paragraph::new(format!(" {letter} ")).style(letter_style),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+
+    let title = truncate(&fav.title, inner.width.saturating_sub(1) as usize);
+    frame.render_widget(
+        Paragraph::new(title).style(Style::new().fg(th.text).bg(if selected {
+            th.bg_panel
+        } else {
+            th.bg
+        })),
+        Rect::new(inner.x, inner.y.saturating_add(1), inner.width, 1),
+    );
+}
+
+fn draw_reading_row(frame: &mut Frame, th: &Theme, item: &ReadingItem, area: Rect, selected: bool) {
+    let style = if selected {
+        Style::new()
+            .fg(th.link_active)
+            .bg(th.bg_panel)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(th.text).bg(th.bg)
+    };
+    let line = format!("  ◆  {}  ·  {}", truncate(&item.title, 40), truncate(&item.url, 36));
+    frame.render_widget(Paragraph::new(line).style(style), area);
+}
+
+fn draw_edit_modal(frame: &mut Frame, app: &App, area: Rect, ed: &EditState) {
+    let th = &app.theme;
+    let w = (area.width as usize * 70 / 100).clamp(40, 64) as u16;
+    let h: u16 = 9;
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    let modal = Rect::new(x, y, w, h);
+    frame.render_widget(Clear, modal);
+
+    let title = match ed.kind {
+        EditKind::AddFavorite => " Add Favorite ",
+        EditKind::EditFavorite(_) => " Edit Favorite ",
+        EditKind::AddReading => " Add to Reading List ",
+        EditKind::EditReading(_) => " Edit Reading List ",
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(th.accent))
+        .style(Style::new().bg(th.bg_panel))
+        .title(Span::styled(
+            title,
+            Style::new().fg(th.accent).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let t_focus = ed.field == EditField::Title;
+    let u_focus = ed.field == EditField::Url;
+    let t_line = format!(
+        " Title  {}{}",
+        ed.title,
+        if t_focus { "█" } else { "" }
+    );
+    let u_line = format!(
+        " URL    {}{}",
+        ed.url,
+        if u_focus { "█" } else { "" }
+    );
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                t_line,
+                if t_focus {
+                    Style::new().fg(th.link_active).bg(th.bg_panel)
+                } else {
+                    Style::new().fg(th.text).bg(th.bg_panel)
+                },
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                u_line,
+                if u_focus {
+                    Style::new().fg(th.link_active).bg(th.bg_panel)
+                } else {
+                    Style::new().fg(th.text).bg(th.bg_panel)
+                },
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                " tab switch field · enter save · esc cancel",
+                Style::new().fg(th.text_dim).bg(th.bg_panel),
+            )),
+        ]),
+        inner,
+    );
+}
+
+fn draw_browse(frame: &mut Frame, app: &App, body: Rect) {
+    let page = match app.session.current() {
+        Some(p) => p,
+        None => return,
+    };
+
+    let show_centered = app.focus == Focus::Search
+        && page.doc.primary_search().is_some()
+        && (page.doc.wants_centered_search()
+            || page.doc.is_search_home()
+            || app.search_buf.is_empty() && page.doc.links.len() < 15);
+
+    if show_centered {
+        draw_centered_search(frame, app, body);
+    } else {
+        draw_content(frame, app, body);
+        if app.focus == Focus::Search && page.doc.primary_search().is_some() {
+            draw_top_search_bar(frame, app, body);
+        }
+    }
+}
+
 fn draw_centered_search(frame: &mut Frame, app: &App, area: Rect) {
     let th = &app.theme;
-    let doc = app.doc();
+    let doc = match app.doc() {
+        Some(d) => d,
+        None => return,
+    };
     let form = doc.primary_search();
     let placeholder = form
         .map(|f| f.placeholder.as_str())
         .unwrap_or("Search…");
     let brand = brand_label(doc);
 
-    // Fill full body dark (like Grok scrollback empty state)
     frame.render_widget(Block::default().style(Style::new().bg(th.bg)), area);
 
-    // Stack: brand, pad, prompt box (5 rows tall for Grok-like density), pad, hints
     let box_w = (area.width as usize * 62 / 100).clamp(40, 78) as u16;
     let box_h: u16 = 5;
     let total_h = 2 + 1 + box_h + 2 + 2;
     let top = area.y + area.height.saturating_sub(total_h) / 2;
     let left = area.x + area.width.saturating_sub(box_w) / 2;
 
-    // Brand (centered, accent)
     let brand_line = format!("◆  {brand}");
     let brand_w = brand_line.chars().count() as u16;
     let brand_x = area.x + area.width.saturating_sub(brand_w) / 2;
@@ -531,7 +1128,6 @@ fn draw_centered_search(frame: &mut Frame, app: &App, area: Rect) {
         Rect::new(brand_x, top, brand_w.min(area.width), 1),
     );
 
-    // Prompt box — Grok input energy: panel bg, magenta border, left accent title
     let box_area = Rect::new(left, top + 3, box_w.min(area.width), box_h);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -547,7 +1143,6 @@ fn draw_centered_search(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(box_area);
     frame.render_widget(block, box_area);
 
-    // Two-line input area inside the box
     let display = if app.search_buf.is_empty() {
         format!("  {placeholder}")
     } else {
@@ -561,7 +1156,6 @@ fn draw_centered_search(frame: &mut Frame, app: &App, area: Rect) {
             .bg(th.bg_panel)
             .add_modifier(Modifier::BOLD)
     };
-    // Vertical center text in the inner box
     let inner_mid = Rect::new(
         inner.x,
         inner.y + inner.height.saturating_sub(1) / 2,
@@ -570,9 +1164,8 @@ fn draw_centered_search(frame: &mut Frame, app: &App, area: Rect) {
     );
     frame.render_widget(Paragraph::new(display).style(input_style), inner_mid);
 
-    // Hints under box
     let hint1 = "enter to search";
-    let hint2 = "tab · page content    [ ] · history    q · quit";
+    let hint2 = "tab · page content    H · home    q · quit";
     for (i, hint) in [hint1, hint2].iter().enumerate() {
         let hint_w = hint.len() as u16;
         let hint_x = area.x + area.width.saturating_sub(hint_w) / 2;

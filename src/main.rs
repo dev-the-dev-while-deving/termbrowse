@@ -4,18 +4,21 @@
 //! No headless Chrome. No screenshot paint. Same Document for humans + agents.
 
 mod fetch;
+mod home;
 mod layout;
 mod model;
 mod parse;
+mod search;
 mod session;
 mod snapshot;
 mod theme;
 mod tui_session;
 mod urlutil;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use layout::layout_document;
+use search::Query;
 use session::{load_page, LoadSource};
 use snapshot::{snapshot, to_json};
 use urlutil::ensure_http_url;
@@ -23,14 +26,14 @@ use urlutil::ensure_http_url;
 #[derive(Parser, Debug)]
 #[command(
     name = "termbrowse",
-    about = "Custom terminal web session — structure browser, no Chrome",
+    about = "Terminal browser — Safari-style start page, structure browsing, no Chrome",
     version
 )]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Open this URL in the interactive TUI
+    /// Open this URL (omit to show Start Page)
     url: Option<String>,
 
     /// Terminal width for snapshot/text layout
@@ -40,6 +43,19 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Safari-style start page (Favorites + Reading List)
+    Home,
+    /// PrivSearch: ranked web results (partner + our ranking). No ads.
+    Search {
+        /// Search query (quote multi-word queries)
+        query: Vec<String>,
+        /// Max results (1–50)
+        #[arg(long, short = 'n', default_value_t = 10)]
+        limit: usize,
+        /// Emit JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
     /// Open a URL in the interactive session TUI
     Open { url: String },
     /// Agent JSON snapshot of the structured page
@@ -71,6 +87,24 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Some(Commands::Home) => tui_session::run_home().await?,
+        Some(Commands::Search {
+            query,
+            limit,
+            json,
+        }) => {
+            let text = query.join(" ");
+            if text.trim().is_empty() {
+                anyhow::bail!("usage: termbrowse search <query>");
+            }
+            let q = Query::new(text).with_limit(limit);
+            let resp = search::run(q).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&resp)?);
+            } else {
+                print!("{}", search::format_text(&resp));
+            }
+        }
         Some(Commands::Open { url }) => {
             let url = ensure_http_url(&url)?;
             tui_session::run(&url).await?;
@@ -102,13 +136,13 @@ async fn main() -> Result<()> {
                 print!("{}", layout.text);
             }
         }
-        None => {
-            let url = cli
-                .url
-                .context("usage: termbrowse <url>\n  termbrowse snapshot <url>\n  termbrowse text <url>")?;
-            let url = ensure_http_url(&url)?;
-            tui_session::run(&url).await?;
-        }
+        None => match cli.url {
+            None => tui_session::run_home().await?,
+            Some(url) => {
+                let url = ensure_http_url(&url)?;
+                tui_session::run(&url).await?;
+            }
+        },
     }
 
     Ok(())
