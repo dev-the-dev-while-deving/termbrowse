@@ -171,26 +171,25 @@ impl Document {
         let mut pairs: Vec<(String, String)> = form.hidden.clone();
         pairs.push((form.query_param.clone(), query.to_string()));
 
+        // CAPTCHA-prone hosts → DuckDuckGo HTML
         let host = base.host_str().unwrap_or("").to_ascii_lowercase();
-        if host.contains("google.") {
-            pairs.retain(|(k, _)| {
-                let k = k.as_str();
-                k == "q" || k == "hl" || k == "gbv" || k == "ie"
-            });
-            if !pairs.iter().any(|(k, _)| k == "gbv") {
-                pairs.push(("gbv".into(), "1".into()));
-            }
-            if !pairs.iter().any(|(k, _)| k == "hl") {
-                pairs.push(("hl".into(), "en".into()));
-            }
-        }
-
-        let mut url = base;
+        let mut url = if host.contains("google.") || host.contains("bing.") {
+            Url::parse("https://html.duckduckgo.com/html/").ok()?
+        } else {
+            base
+        };
         {
             let mut ser = url.query_pairs_mut();
             ser.clear();
             for (k, v) in &pairs {
-                ser.append_pair(k, v);
+                // only keep q for rewritten engines
+                if host.contains("google.") || host.contains("bing.") {
+                    if k == "q" || k == form.query_param {
+                        ser.append_pair("q", v);
+                    }
+                } else {
+                    ser.append_pair(k, v);
+                }
             }
         }
         Some(url.to_string())
