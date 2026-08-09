@@ -46,26 +46,41 @@ Not a 1:1 browser paint — same *kinds* of elements, terminal treatment:
 ## Quick start
 
 ```bash
-# PrivSearch (ranked results — default partner: DuckDuckGo HTML)
-cargo run --release -- search "rust async"
-cargo run --release -- search -n 5 --json "privacy search engine"
-PRIVSEARCH_PROVIDER=mock cargo run --release -- search "demo"
+# Safari-style Start Page (Favorites + Reading List) — default
+cargo run --release
+cargo run --release -- home
 
-# Structure browser
+# Open a URL directly
 cargo run --release -- https://example.com
-cargo run --release -- https://doc.rust-lang.org/book/
+
+# PrivSearch (ranked results)
+cargo run --release -- search "rust async"
 
 # Agent
 cargo run --release -- snapshot https://example.com
 ```
 
-### PrivSearch env
+### Start Page (Safari-like)
 
-| Variable | Values | Default |
-|----------|--------|---------|
-| `PRIVSEARCH_PROVIDER` | `ddg`, `mock` | `ddg` |
+Favorites as a **tile grid** + **Reading List** below. Persisted at:
 
-### Keys
+- macOS: `~/Library/Application Support/termbrowse/home.json`
+- Linux: `~/.config/termbrowse/home.json`
+
+| Key | Action |
+|-----|--------|
+| arrows / `hjkl` | Move selection |
+| `Tab` | Favorites ↔ Reading List |
+| `Enter` | Open |
+| `a` | Add |
+| `e` | Edit selected |
+| `d` | Delete selected |
+| `/` | DuckDuckGo HTML search |
+| `q` | Quit |
+
+While browsing: **`H`** home · **`f`** add Favorite · **`s`** save Reading List · **`Esc`** home.
+
+### Browse keys
 
 | Key | Action |
 |-----|--------|
@@ -77,6 +92,12 @@ cargo run --release -- snapshot https://example.com
 | `[` / `]` | History |
 | `o` or `:` | Open URL |
 | `q` | Quit |
+
+### PrivSearch env
+
+| Variable | Values | Default |
+|----------|--------|---------|
+| `PRIVSEARCH_PROVIDER` | `ddg`, `mock` | `ddg` |
 
 ## Search & CAPTCHA
 
