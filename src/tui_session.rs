@@ -146,7 +146,8 @@ impl App {
         self.selected_link = 0;
         self.search_buf.clear();
         if let Some(doc) = self.doc() {
-            if doc.is_search_home() || doc.primary_search().is_some() {
+            // Centered DDG box only on search home / captcha; else show page content.
+            if doc.is_search_home() || doc.wants_centered_search() {
                 self.focus = Focus::Search;
             } else {
                 self.focus = Focus::Content;
@@ -215,14 +216,9 @@ impl App {
             self.status = "type a query first".into();
             return Ok(());
         }
-        let Some(doc) = self.doc() else {
-            return Ok(());
-        };
-        let Some(url) = doc.search_url(&q) else {
-            self.status = "no search form on this page".into();
-            return Ok(());
-        };
-        self.status = "searching…".into();
+        // Always DuckDuckGo — only search engine.
+        let url = Document::ddg_search_url(&q);
+        self.status = "searching DuckDuckGo…".into();
         let page = self.session.open(&url).await?;
         self.status = status_for(page);
         self.after_nav();
@@ -660,12 +656,18 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> R
             KeyCode::Char('f') => app.add_current_to_favorites(),
             KeyCode::Char('s') => app.add_current_to_reading(),
             KeyCode::Char('/') | KeyCode::Char('i') => {
-                if app.doc().and_then(|d| d.primary_search()).is_some() {
-                    app.focus = Focus::Search;
-                    app.status = "search — type query, enter to go".into();
-                } else {
-                    app.status = "no search form — H home or o url".into();
+                // Always DuckDuckGo search — open DDG if needed, then focus box.
+                let on_ddg = app
+                    .doc()
+                    .map(|d| d.url.contains("duckduckgo.com"))
+                    .unwrap_or(false);
+                if !on_ddg {
+                    if let Err(e) = app.go("https://html.duckduckgo.com/html/").await {
+                        app.status = format!("search error: {e:#}");
+                    }
                 }
+                app.focus = Focus::Search;
+                app.status = "DuckDuckGo — type query, enter".into();
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 app.scroll = app.scroll.saturating_add(1);
@@ -1080,16 +1082,14 @@ fn draw_browse(frame: &mut Frame, app: &App, body: Rect) {
     };
 
     let show_centered = app.focus == Focus::Search
-        && page.doc.primary_search().is_some()
-        && (page.doc.wants_centered_search()
-            || page.doc.is_search_home()
-            || app.search_buf.is_empty() && page.doc.links.len() < 15);
+        && (page.doc.is_search_home() || page.doc.wants_centered_search());
 
     if show_centered {
         draw_centered_search(frame, app, body);
     } else {
         draw_content(frame, app, body);
-        if app.focus == Focus::Search && page.doc.primary_search().is_some() {
+        // Compact DDG search strip when user pressed / on a normal page
+        if app.focus == Focus::Search {
             draw_top_search_bar(frame, app, body);
         }
     }
@@ -1264,24 +1264,18 @@ fn draw_content(frame: &mut Frame, app: &App, area: Rect) {
 
 fn brand_label(doc: &Document) -> String {
     if doc.looks_like_captcha() || doc.title.contains("CAPTCHA") {
-        return "Search blocked".into();
+        return "Search (DuckDuckGo)".into();
     }
-    let host = url::Url::parse(&doc.url)
-        .ok()
-        .and_then(|u| u.host_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| doc.title.clone());
-    if host.contains("google") {
-        "Google".into()
-    } else if host.contains("duckduckgo") {
-        "DuckDuckGo".into()
-    } else if host.contains("bing") {
-        "Bing".into()
-    } else if host.contains("youtube") {
-        "YouTube".into()
-    } else if !doc.title.is_empty() && doc.title.len() < 40 {
+    if doc.url.contains("duckduckgo") {
+        return "DuckDuckGo".into();
+    }
+    if !doc.title.is_empty() && doc.title.len() < 40 {
         doc.title.clone()
     } else {
-        host
+        url::Url::parse(&doc.url)
+            .ok()
+            .and_then(|u| u.host_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "Search".into())
     }
 }
 

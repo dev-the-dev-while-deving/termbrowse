@@ -39,12 +39,12 @@ pub fn parse_html(url: &str, html: &str, fetch_ms: u64) -> Document {
     // Collapse runs of spacers.
     blocks = collapse_spacers(blocks);
 
-    let mut forms = extract_search_forms(&dom, url);
-    // Known search engines: always expose a search box even if HTML hid the form.
-    if forms.is_empty() {
-        if let Some(f) = known_engine_form(url) {
-            forms.push(f);
-        }
+    // Product search is DuckDuckGo only — ignore site-specific engine forms.
+    let forms = vec![safe_search_form()];
+
+    // Unwrap DDG redirect wrappers so stored links open the real destination.
+    for link in &mut links {
+        link.href = crate::urlutil::unwrap_redirect(&link.href);
     }
 
     let parse_ms = start.elapsed().as_millis() as u64;
@@ -187,67 +187,20 @@ fn score_search_form(action: &str, query_param: &str, placeholder: &str) -> i32 
 }
 
 /// Ensure search engines always get a typeable form.
-/// Attach search forms. **Google/Bing are rewired to DuckDuckGo HTML** —
-/// those engines CAPTCHA terminal clients; we don't pretend otherwise.
+/// Always attach the only product search engine: DuckDuckGo HTML.
 pub fn attach_known_forms(doc: &mut Document) {
-    let host = url::Url::parse(&doc.url)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
-        .unwrap_or_default();
-
-    // Captcha-prone search hosts: always use our safe DDG form.
-    if host.contains("google.") || host.contains("bing.") {
-        doc.forms = vec![safe_search_form()];
-        return;
-    }
-    if host.contains("duckduckgo.") {
-        doc.forms = vec![safe_search_form()];
-        return;
-    }
-    if doc.forms.is_empty() {
-        if let Some(f) = known_engine_form(&doc.url) {
-            doc.forms.push(f);
-        }
-    }
+    doc.forms = vec![safe_search_form()];
 }
 
-/// Default terminal-safe search (DuckDuckGo HTML lite).
+/// Only search engine: DuckDuckGo HTML lite.
 pub fn safe_search_form() -> SearchForm {
     SearchForm {
         action: "https://html.duckduckgo.com/html/".into(),
         method: "get".into(),
         query_param: "q".into(),
-        placeholder: "Search the web (DuckDuckGo)…".into(),
+        placeholder: "Search DuckDuckGo…".into(),
         hidden: vec![],
     }
-}
-
-/// Hard-coded engines when markup is minimal / JS-only.
-fn known_engine_form(page_url: &str) -> Option<SearchForm> {
-    let u = page_url.to_ascii_lowercase();
-    let host = url::Url::parse(page_url)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
-        .unwrap_or_default();
-
-    // Google / Bing → DDG (CAPTCHA avoidance)
-    if host.contains("google.") || host.contains("bing.") {
-        return Some(safe_search_form());
-    }
-    if host.contains("duckduckgo.") || u.contains("duckduckgo.com") {
-        return Some(safe_search_form());
-    }
-    if host.contains("youtube.") {
-        // YouTube results also bot-wall often; keep form but warn via placeholder.
-        return Some(SearchForm {
-            action: "https://html.duckduckgo.com/html/".into(),
-            method: "get".into(),
-            query_param: "q".into(),
-            placeholder: "Search via DuckDuckGo (YouTube blocks terminals)…".into(),
-            hidden: vec![],
-        });
-    }
-    None
 }
 
 /// Replace CAPTCHA / sorry pages with a clear terminal-native explanation.
@@ -852,17 +805,28 @@ mod tests {
     }
 
     #[test]
-    fn google_rewrites_to_ddg_search() {
-        let mut doc = parse_html("https://www.google.com/", "<html><body></body></html>", 1);
-        attach_known_forms(&mut doc);
-        assert!(!doc.forms.is_empty());
+    fn only_duckduckgo_search_engine() {
+        let doc = parse_html("https://example.com/", "<html><body></body></html>", 1);
+        assert_eq!(doc.forms.len(), 1);
+        assert!(doc.forms[0].action.contains("duckduckgo.com"));
         let url = doc.search_url("rust lang").unwrap();
-        // Terminal clients use DDG HTML — Google CAPTCHAs bots.
-        assert!(
-            url.contains("duckduckgo.com"),
-            "expected DDG rewrite, got {url}"
-        );
+        assert!(url.contains("duckduckgo.com"), "got {url}");
         assert!(url.contains("q=rust"));
+    }
+
+    #[test]
+    fn unwraps_ddg_result_links() {
+        let html = r#"
+        <html><body><main>
+          <a href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fdoc.rust-lang.org%2Fbook%2F">Rust Book</a>
+        </main></body></html>
+        "#;
+        let doc = parse_html("https://html.duckduckgo.com/html/?q=rust", html, 1);
+        assert!(
+            doc.links.iter().any(|l| l.href.contains("doc.rust-lang.org")),
+            "expected unwrapped link, got {:?}",
+            doc.links
+        );
     }
 
     #[test]
@@ -890,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_form_with_q() {
+    fn parses_form_with_q_but_search_is_always_ddg() {
         let html = r#"
         <html><body>
           <form action="/search" method="get">
@@ -900,10 +864,12 @@ mod tests {
         </body></html>
         "#;
         let doc = parse_html("https://example.com/", html, 1);
+        // Product search is always DuckDuckGo, not the page's form.
         assert_eq!(doc.forms[0].query_param, "q");
-        assert_eq!(doc.forms[0].placeholder, "Search site");
+        assert!(doc.forms[0].action.contains("duckduckgo.com"));
         let u = doc.search_url("hello").unwrap();
+        assert!(u.contains("duckduckgo.com"));
         assert!(u.contains("q=hello"));
-        assert!(u.contains("hl=en"));
+        assert!(!u.contains("hl=en"));
     }
 }

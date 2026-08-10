@@ -123,14 +123,19 @@ impl Document {
             .or_else(|| Url::parse(href).ok())
     }
 
+    /// Product search form (always DuckDuckGo). Present when page has a form or is DDG.
     pub fn primary_search(&self) -> Option<&SearchForm> {
         self.forms.first()
     }
 
+    /// DuckDuckGo HTML is the **only** search engine. Always available.
+    pub fn ddg_search_url(query: &str) -> String {
+        let mut u = Url::parse("https://html.duckduckgo.com/html/").expect("ddg url");
+        u.query_pairs_mut().append_pair("q", query.trim());
+        u.to_string()
+    }
+
     pub fn is_search_home(&self) -> bool {
-        if self.primary_search().is_none() {
-            return false;
-        }
         if self.looks_like_captcha()
             || self.title.contains("CAPTCHA")
             || self.title.contains("Blocked")
@@ -138,61 +143,29 @@ impl Document {
             return true;
         }
         if let Ok(u) = Url::parse(&self.url) {
-            let path = u.path();
-            let path_ok = path.is_empty() || path == "/" || path.starts_with("/html");
-            let no_q = u
-                .query_pairs()
-                .all(|(k, _)| k != "q" && k != "search_query" && k != "p");
-            if path_ok && no_q {
-                let host = u.host_str().unwrap_or("");
-                if host.contains("google.")
-                    || host.contains("duckduckgo.")
-                    || host.contains("bing.")
-                    || host.contains("youtube.")
-                {
-                    return true;
-                }
+            let host = u.host_str().unwrap_or("").to_ascii_lowercase();
+            if host.contains("duckduckgo.") {
+                let no_q = u.query_pairs().all(|(k, _)| k != "q");
+                let path = u.path();
+                let path_ok = path.is_empty() || path == "/" || path.starts_with("/html");
+                return path_ok && no_q;
             }
         }
-        self.text_len() < 400 && self.links.len() < 40
+        // Generic sparse page with a search form
+        self.primary_search().is_some() && self.text_len() < 400 && self.links.len() < 40
     }
 
     pub fn wants_centered_search(&self) -> bool {
-        self.primary_search().is_some()
-            && (self.is_search_home() || self.looks_like_captcha())
+        self.is_search_home() || self.looks_like_captcha()
     }
 
+    /// Always DuckDuckGo HTML — no other engines.
     pub fn search_url(&self, query: &str) -> Option<String> {
-        let form = self.primary_search()?;
-        if !form.method.eq_ignore_ascii_case("get") {
+        let q = query.trim();
+        if q.is_empty() {
             return None;
         }
-        let base = self.resolve_href(&form.action)?;
-        let mut pairs: Vec<(String, String)> = form.hidden.clone();
-        pairs.push((form.query_param.clone(), query.to_string()));
-
-        // CAPTCHA-prone hosts → DuckDuckGo HTML
-        let host = base.host_str().unwrap_or("").to_ascii_lowercase();
-        let mut url = if host.contains("google.") || host.contains("bing.") {
-            Url::parse("https://html.duckduckgo.com/html/").ok()?
-        } else {
-            base
-        };
-        {
-            let mut ser = url.query_pairs_mut();
-            ser.clear();
-            for (k, v) in &pairs {
-                // only keep q for rewritten engines
-                if host.contains("google.") || host.contains("bing.") {
-                    if k == "q" || *k == form.query_param {
-                        ser.append_pair("q", v);
-                    }
-                } else {
-                    ser.append_pair(k, v);
-                }
-            }
-        }
-        Some(url.to_string())
+        Some(Self::ddg_search_url(q))
     }
 
     pub fn looks_like_captcha(&self) -> bool {

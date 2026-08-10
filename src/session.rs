@@ -91,12 +91,8 @@ impl Session {
             .current()
             .map(|p| p.doc.url.clone())
             .unwrap_or_default();
-        let abs = url::Url::parse(&base)
-            .ok()
-            .and_then(|b| b.join(href).ok())
-            .or_else(|| url::Url::parse(href).ok())
-            .context("bad href")?
-            .to_string();
+        // Resolve relative links + unwrap DDG/tracking redirects → real page.
+        let abs = crate::urlutil::resolve_and_unwrap(&base, href)?;
         self.open(&abs).await
     }
 }
@@ -136,35 +132,32 @@ async fn load_structure(url: &str) -> Result<Document> {
     Ok(doc)
 }
 
-/// Reroute captcha-prone search URLs to DuckDuckGo HTML.
+/// Only search engine: DuckDuckGo HTML. Rewrite other search hosts there.
 fn normalize_search_url(url: &str) -> String {
     let Ok(u) = url::Url::parse(url) else {
         return url.to_string();
     };
     let host = u.host_str().unwrap_or("").to_ascii_lowercase();
-    let is_google_search = host.contains("google.")
-        && (u.path().contains("search") || u.query_pairs().any(|(k, _)| k == "q"));
-    let is_bing_search = host.contains("bing.") && u.path().contains("search");
 
-    if is_google_search || is_bing_search {
+    // Already DDG HTML — keep (unwrap not needed for page load).
+    if host.contains("duckduckgo.") {
+        return url.to_string();
+    }
+
+    // Google / Bing search or home → DDG HTML (optionally keep q=).
+    if host.contains("google.") || host.contains("bing.") {
         let q = u
             .query_pairs()
             .find(|(k, _)| k == "q")
             .map(|(_, v)| v.to_string());
         if let Some(q) = q {
-            if let Ok(mut ddg) = url::Url::parse("https://html.duckduckgo.com/html/") {
-                ddg.query_pairs_mut().append_pair("q", &q);
-                return ddg.to_string();
-            }
+            return crate::model::Document::ddg_search_url(&q);
         }
-        // google.com home / empty → DDG home
         return "https://html.duckduckgo.com/html/".into();
     }
-    // google.com bare → DDG (avoid captcha homepage)
-    if host.contains("google.") && (u.path().is_empty() || u.path() == "/") {
-        return "https://html.duckduckgo.com/html/".into();
-    }
-    url.to_string()
+
+    // Tracking redirects on open
+    crate::urlutil::unwrap_redirect(url)
 }
 
 /// JS-heavy shell with almost no HTML content — explain, don't launch Chrome.
