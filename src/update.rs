@@ -1,6 +1,12 @@
 //! Self-update helpers. GitHub Releases only. No telemetry.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+use std::process::Command;
 
 pub fn map_target(os: &str, arch: &str) -> Result<String> {
     let t = match (os, arch) {
@@ -45,9 +51,94 @@ pub fn banner(latest: &str) -> String {
     format!("v{} available — browse update", strip_v(latest))
 }
 
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let d = Sha256::digest(bytes);
+    d.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+pub fn parse_sha256sums(text: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(hex) = parts.next() else { continue };
+        let Some(name) = parts.next() else { continue };
+        let name = name.trim_start_matches('*');
+        map.insert(name.to_string(), hex.to_ascii_lowercase());
+    }
+    map
+}
+
+pub fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<()> {
+    let got = sha256_hex(bytes);
+    let exp = expected_hex.trim().to_ascii_lowercase();
+    if got != exp {
+        bail!("checksum mismatch, aborting");
+    }
+    Ok(())
+}
+
+pub fn atomic_replace(dest: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create {}", parent.display()))?;
+    }
+    let tmp = dest.with_extension("new");
+    let result = (|| {
+        fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
+        let mut perms = fs::metadata(&tmp)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&tmp, perms)?;
+        fs::rename(&tmp, dest).with_context(|| format!("replace {}", dest.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+pub fn extract_browse_from_tarball(tarball: &[u8]) -> Result<Vec<u8>> {
+    let dir = std::env::temp_dir().join(format!(
+        "browse-extract-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    fs::create_dir_all(&dir)?;
+    let archive = dir.join("in.tar.gz");
+    fs::write(&archive, tarball)?;
+    let status = Command::new("tar")
+        .args(["-x", "-z", "-f"])
+        .arg(&archive)
+        .arg("-C")
+        .arg(&dir)
+        .arg("browse")
+        .status()
+        .context("run tar")?;
+    if !status.success() {
+        let _ = fs::remove_dir_all(&dir);
+        bail!("tar extract failed");
+    }
+    let bytes = fs::read(dir.join("browse"));
+    let _ = fs::remove_dir_all(&dir);
+    bytes.context("read extracted browse")
+}
+
+pub fn install_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
+    let bin = extract_browse_from_tarball(tarball)?;
+    atomic_replace(dest, &bin)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn maps_supported_targets() {
@@ -88,5 +179,64 @@ mod tests {
     fn banner_text() {
         assert_eq!(banner("0.2.0"), "v0.2.0 available — browse update");
         assert_eq!(banner("v0.2.0"), "v0.2.0 available — browse update");
+    }
+
+    #[test]
+    fn sha256_roundtrip() {
+        let hex = sha256_hex(b"hello");
+        assert_eq!(
+            hex,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+        verify_sha256(b"hello", &hex).unwrap();
+        assert!(verify_sha256(b"hello", "deadbeef").is_err());
+    }
+
+    #[test]
+    fn parses_sha256sums() {
+        let text = "abc123  browse-0.1.0-aarch64-apple-darwin.tar.gz\n\
+                    def456  SHA256SUMS\n";
+        let map = parse_sha256sums(text);
+        assert_eq!(
+            map.get("browse-0.1.0-aarch64-apple-darwin.tar.gz").map(String::as_str),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn atomic_replace_writes_executable() {
+        let dir = std::env::temp_dir().join(format!("browse-replace-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let dest = dir.join("browse");
+        atomic_replace(&dest, b"#!/bin/sh\necho hi\n").unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho hi\n");
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+        assert_ne!(mode & 0o111, 0, "expected executable, mode={mode:o}");
+        atomic_replace(&dest, b"new").unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extracts_browse_member_from_tarball() {
+        let dir = std::env::temp_dir().join(format!("browse-tar-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("browse"), b"payload-bytes").unwrap();
+        let tar_path = dir.join("b.tar.gz");
+        let status = std::process::Command::new("tar")
+            .args(["-c", "-z", "-f"])
+            .arg(&tar_path)
+            .arg("-C")
+            .arg(&dir)
+            .arg("browse")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let tarball = std::fs::read(&tar_path).unwrap();
+        let dest = dir.join("out").join("browse");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        install_tarball(&tarball, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"payload-bytes");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
