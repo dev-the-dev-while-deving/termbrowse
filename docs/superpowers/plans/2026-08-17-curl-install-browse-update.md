@@ -10,7 +10,27 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-17-curl-install-browse-update-design.md`
 
-**Workspace:** Work in place on `from-scratch`. Do not create a git worktree — `src/` is not in HEAD yet. Commit only files this task touches (plus `Cargo.lock` if you change crates). Follow TDD: failing test, then minimal code.
+**Workspace:** Work in place on `from-scratch`. Do not create a git worktree — most of `src/` is still untracked (only `src/main.rs` and `src/update.rs` are in git). Commit only files this task touches (plus `Cargo.lock` if you change crates). Follow TDD: failing test, then minimal code. Tests: `cargo test --bin termbrowse update::tests` (no `src/lib.rs`; after Task 5 the bin name becomes `browse`).
+
+## Progress (paused 2026-08-17)
+
+**Resume at Task 5.** Site / Vercel / Supabase stay parked (second spec). Execution: subagent-driven development.
+
+| Task | Status | Commit |
+|------|--------|--------|
+| 1 Target / version / asset / banner | done + spec + quality | `e779d12` |
+| 2 SHA-256 / atomic replace / tar extract | done + spec + quality | `ca8ee74` |
+| 2b Refuse symlink `browse` member | done | `57b4a72` |
+| 3 24h update-check cache | done + spec + quality | `01cd563` |
+| 4 GitHub parse + `run_update_with` | done + spec ✅; quality review was in flight when paused | `4f35dd3` |
+| 5 CLI `browse` + `browse update` | **NEXT** | |
+| 6 Start Page notice | pending | |
+| 7 `install.sh` + shell test | pending | |
+| 8 Release workflow + README | pending | |
+
+HEAD: `4f35dd32aaf49d463a79047e46ea2d378942e36d` on `from-scratch` (6 commits ahead of origin; **not pushed**).
+
+Untracked (needed to compile, do not dump into the next feature commit unless the task says so): the rest of `src/*.rs`, `docs/superpowers/specs/2026-08-14-structure-identity-engine.md`. `README.md` is modified (Task 8).
 
 ---
 
