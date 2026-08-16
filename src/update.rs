@@ -125,7 +125,20 @@ pub fn extract_browse_from_tarball(tarball: &[u8]) -> Result<Vec<u8>> {
         let _ = fs::remove_dir_all(&dir);
         bail!("tar extract failed");
     }
-    let bytes = fs::read(dir.join("browse"));
+    let browse = dir.join("browse");
+    let meta = match fs::symlink_metadata(&browse) {
+        Ok(m) => m,
+        Err(_) => {
+            let _ = fs::remove_dir_all(&dir);
+            bail!("tar extract failed");
+        }
+    };
+    let ft = meta.file_type();
+    if ft.is_symlink() || !ft.is_file() {
+        let _ = fs::remove_dir_all(&dir);
+        bail!("tar extract failed");
+    }
+    let bytes = fs::read(&browse);
     let _ = fs::remove_dir_all(&dir);
     bytes.context("read extracted browse")
 }
@@ -237,6 +250,37 @@ mod tests {
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
         install_tarball(&tarball, &dest).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"payload-bytes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_refuses_symlink_browse() {
+        let dir = std::env::temp_dir().join(format!(
+            "browse-tar-symlink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        std::os::unix::fs::symlink("/etc/passwd", dir.join("browse")).unwrap();
+        let tar_path = dir.join("b.tar.gz");
+        let status = std::process::Command::new("tar")
+            .args(["-c", "-z", "-f"])
+            .arg(&tar_path)
+            .arg("-C")
+            .arg(&dir)
+            .arg("browse")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let tarball = std::fs::read(&tar_path).unwrap();
+        let err = extract_browse_from_tarball(&tarball).unwrap_err().to_string();
+        assert!(
+            err.contains("tar extract failed") || err.contains("symlink") || err.contains("not a regular file"),
+            "{err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
