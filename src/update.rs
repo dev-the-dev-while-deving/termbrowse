@@ -208,6 +208,112 @@ pub fn install_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
     atomic_replace(dest, &bin)
 }
 
+pub const GITHUB_REPO: &str = "dev-the-dev-while-deving/termbrowse";
+
+pub fn latest_api_url() -> String {
+    format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest")
+}
+
+#[derive(Debug, Clone)]
+pub struct Release {
+    pub tag: String,
+    pub version: String,
+    pub assets: Vec<Asset>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Asset {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateOutcome {
+    AlreadyLatest { version: String },
+    Updated { from: String, to: String },
+}
+
+pub trait Fetcher {
+    fn get_text(&self, url: &str) -> Result<String>;
+    fn get_bytes(&self, url: &str) -> Result<Vec<u8>>;
+}
+
+#[derive(Deserialize)]
+struct GhRelease {
+    tag_name: String,
+    assets: Vec<GhAsset>,
+}
+
+#[derive(Deserialize)]
+struct GhAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+pub fn parse_release_json(json: &str) -> Result<Release> {
+    let raw: GhRelease = serde_json::from_str(json).context("parse release json")?;
+    let version = strip_v(&raw.tag_name).to_string();
+    Ok(Release {
+        tag: raw.tag_name,
+        version,
+        assets: raw
+            .assets
+            .into_iter()
+            .map(|a| Asset {
+                name: a.name,
+                url: a.browser_download_url,
+            })
+            .collect(),
+    })
+}
+
+pub fn pick_asset<'a>(release: &'a Release, target: &str) -> Result<&'a Asset> {
+    let want = asset_filename(&release.version, target);
+    release
+        .assets
+        .iter()
+        .find(|a| a.name == want)
+        .with_context(|| format!("no asset {want}"))
+}
+
+pub fn pick_checksums_url(release: &Release) -> Result<&str> {
+    release
+        .assets
+        .iter()
+        .find(|a| a.name == "SHA256SUMS")
+        .map(|a| a.url.as_str())
+        .context("no SHA256SUMS asset")
+}
+
+pub fn run_update_with(
+    fetcher: &dyn Fetcher,
+    current: &str,
+    dest: &Path,
+    target: &str,
+) -> Result<UpdateOutcome> {
+    let json = fetcher.get_text(&latest_api_url())?;
+    let release = parse_release_json(&json)?;
+    if !is_newer(&release.version, current) {
+        return Ok(UpdateOutcome::AlreadyLatest {
+            version: strip_v(current).to_string(),
+        });
+    }
+    let asset = pick_asset(&release, target)?;
+    let sums_url = pick_checksums_url(&release)?;
+    let sums = fetcher.get_text(sums_url)?;
+    let map = parse_sha256sums(&sums);
+    let expected = map
+        .get(&asset.name)
+        .with_context(|| format!("no checksum for {}", asset.name))?;
+    let tarball = fetcher.get_bytes(&asset.url)?;
+    verify_sha256(&tarball, expected)?;
+    install_tarball(&tarball, dest)?;
+    Ok(UpdateOutcome::Updated {
+        from: strip_v(current).to_string(),
+        to: release.version,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,6 +492,155 @@ mod tests {
         let loaded = load_cache_at(&path);
         assert_eq!(loaded.checked_at, 42);
         assert_eq!(loaded.latest.as_deref(), Some("0.3.0"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn sample_release_json() -> String {
+        r#"{
+          "tag_name": "v0.2.0",
+          "assets": [
+            {
+              "name": "browse-0.2.0-aarch64-apple-darwin.tar.gz",
+              "browser_download_url": "https://example.test/browse-0.2.0-aarch64-apple-darwin.tar.gz"
+            },
+            {
+              "name": "SHA256SUMS",
+              "browser_download_url": "https://example.test/SHA256SUMS"
+            }
+          ]
+        }"#
+        .into()
+    }
+
+    #[test]
+    fn parses_latest_release() {
+        let r = parse_release_json(&sample_release_json()).unwrap();
+        assert_eq!(r.tag, "v0.2.0");
+        assert_eq!(r.version, "0.2.0");
+        let a = pick_asset(&r, "aarch64-apple-darwin").unwrap();
+        assert_eq!(
+            a.url,
+            "https://example.test/browse-0.2.0-aarch64-apple-darwin.tar.gz"
+        );
+        assert_eq!(
+            pick_checksums_url(&r).unwrap(),
+            "https://example.test/SHA256SUMS"
+        );
+    }
+
+    struct MapFetcher {
+        text: std::collections::HashMap<String, String>,
+        bytes: std::collections::HashMap<String, Vec<u8>>,
+    }
+
+    impl Fetcher for MapFetcher {
+        fn get_text(&self, url: &str) -> anyhow::Result<String> {
+            self.text
+                .get(url)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no text {url}"))
+        }
+        fn get_bytes(&self, url: &str) -> anyhow::Result<Vec<u8>> {
+            self.bytes
+                .get(url)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no bytes {url}"))
+        }
+    }
+
+    fn pack_browse(payload: &[u8]) -> Vec<u8> {
+        let dir = std::env::temp_dir().join(format!(
+            "browse-pack-{}-{}",
+            std::process::id(),
+            payload.len()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("browse"), payload).unwrap();
+        let tar_path = dir.join("b.tar.gz");
+        assert!(std::process::Command::new("tar")
+            .args(["-c", "-z", "-f"])
+            .arg(&tar_path)
+            .arg("-C")
+            .arg(&dir)
+            .arg("browse")
+            .status()
+            .unwrap()
+            .success());
+        std::fs::read(&tar_path).unwrap()
+    }
+
+    #[test]
+    fn update_already_latest() {
+        let tarball = pack_browse(b"bin");
+        let mut text = std::collections::HashMap::new();
+        text.insert(latest_api_url(), sample_release_json());
+        let fetcher = MapFetcher {
+            text,
+            bytes: std::collections::HashMap::new(),
+        };
+        let dir = std::env::temp_dir().join(format!("browse-up-same-{}", std::process::id()));
+        let dest = dir.join("browse");
+        let out = run_update_with(&fetcher, "0.2.0", &dest, "aarch64-apple-darwin").unwrap();
+        assert!(matches!(out, UpdateOutcome::AlreadyLatest { .. }));
+        assert!(!dest.exists());
+        let _ = tarball;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_replaces_when_newer() {
+        let tarball = pack_browse(b"new-binary");
+        let hex = sha256_hex(&tarball);
+        let name = asset_filename("0.2.0", "aarch64-apple-darwin");
+        let sums = format!("{hex}  {name}\n");
+        let mut text = std::collections::HashMap::new();
+        text.insert(latest_api_url(), sample_release_json());
+        text.insert("https://example.test/SHA256SUMS".into(), sums);
+        let mut bytes = std::collections::HashMap::new();
+        bytes.insert(
+            "https://example.test/browse-0.2.0-aarch64-apple-darwin.tar.gz".into(),
+            tarball,
+        );
+        let fetcher = MapFetcher { text, bytes };
+        let dir = std::env::temp_dir().join(format!("browse-up-new-{}", std::process::id()));
+        let dest = dir.join("browse");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&dest, b"old").unwrap();
+        let out = run_update_with(&fetcher, "0.1.0", &dest, "aarch64-apple-darwin").unwrap();
+        match out {
+            UpdateOutcome::Updated { from, to } => {
+                assert_eq!(from, "0.1.0");
+                assert_eq!(to, "0.2.0");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new-binary");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_refuses_bad_checksum() {
+        let tarball = pack_browse(b"new-binary");
+        let name = asset_filename("0.2.0", "aarch64-apple-darwin");
+        let sums = format!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  {name}\n");
+        let mut text = std::collections::HashMap::new();
+        text.insert(latest_api_url(), sample_release_json());
+        text.insert("https://example.test/SHA256SUMS".into(), sums);
+        let mut bytes = std::collections::HashMap::new();
+        bytes.insert(
+            "https://example.test/browse-0.2.0-aarch64-apple-darwin.tar.gz".into(),
+            tarball,
+        );
+        let fetcher = MapFetcher { text, bytes };
+        let dir = std::env::temp_dir().join(format!("browse-up-bad-{}", std::process::id()));
+        let dest = dir.join("browse");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&dest, b"old").unwrap();
+        let err = run_update_with(&fetcher, "0.1.0", &dest, "aarch64-apple-darwin")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("checksum mismatch"), "{err}");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"old");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
