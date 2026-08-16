@@ -1,12 +1,72 @@
 //! Self-update helpers. GitHub Releases only. No telemetry.
 
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::home::HomeData;
+
+pub const CHECK_TTL_SECS: u64 = 24 * 60 * 60;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CheckCache {
+    pub checked_at: u64,
+    #[serde(default)]
+    pub latest: Option<String>,
+}
+
+pub fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+pub fn cache_path() -> PathBuf {
+    HomeData::config_dir().join("update-check.json")
+}
+
+pub fn load_cache_at(path: &Path) -> CheckCache {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn load_cache() -> CheckCache {
+    load_cache_at(&cache_path())
+}
+
+pub fn save_cache_at(path: &Path, cache: &CheckCache) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serde_json::to_string_pretty(cache)?)?;
+    Ok(())
+}
+
+pub fn save_cache(cache: &CheckCache) -> Result<()> {
+    save_cache_at(&cache_path(), cache)
+}
+
+pub fn cache_is_fresh(cache: &CheckCache, now: u64) -> bool {
+    cache.checked_at > 0 && now.saturating_sub(cache.checked_at) < CHECK_TTL_SECS
+}
+
+pub fn notice_if_newer(cache: &CheckCache, current: &str) -> Option<String> {
+    let latest = cache.latest.as_deref()?;
+    if is_newer(latest, current) {
+        Some(banner(latest))
+    } else {
+        None
+    }
+}
 
 pub fn map_target(os: &str, arch: &str) -> Result<String> {
     let t = match (os, arch) {
@@ -281,6 +341,51 @@ mod tests {
             err.contains("tar extract failed") || err.contains("symlink") || err.contains("not a regular file"),
             "{err}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_freshness_24h() {
+        let c = CheckCache {
+            checked_at: 1_000,
+            latest: Some("0.2.0".into()),
+        };
+        assert!(cache_is_fresh(&c, 1_000 + 86_399));
+        assert!(!cache_is_fresh(&c, 1_000 + 86_400));
+        assert!(!cache_is_fresh(&c, 1_000 + 86_401));
+    }
+
+    #[test]
+    fn notice_only_when_newer() {
+        let c = CheckCache {
+            checked_at: 1,
+            latest: Some("0.2.0".into()),
+        };
+        assert_eq!(
+            notice_if_newer(&c, "0.1.0").as_deref(),
+            Some("v0.2.0 available — browse update")
+        );
+        assert_eq!(notice_if_newer(&c, "0.2.0"), None);
+        let empty = CheckCache {
+            checked_at: 1,
+            latest: None,
+        };
+        assert_eq!(notice_if_newer(&empty, "0.1.0"), None);
+    }
+
+    #[test]
+    fn cache_roundtrip_file() {
+        let dir = std::env::temp_dir().join(format!("browse-cache-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("update-check.json");
+        let c = CheckCache {
+            checked_at: 42,
+            latest: Some("0.3.0".into()),
+        };
+        save_cache_at(&path, &c).unwrap();
+        let loaded = load_cache_at(&path);
+        assert_eq!(loaded.checked_at, 42);
+        assert_eq!(loaded.latest.as_deref(), Some("0.3.0"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
