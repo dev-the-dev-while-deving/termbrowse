@@ -752,4 +752,13 @@ mod tests {
         );
         assert_eq!(next_ok.latest.as_deref(), Some("0.3.0"));
     }
+
+    #[test]
+    fn install_script_smokes() {
+        let status = std::process::Command::new("sh")
+            .arg("tests/install_test.sh")
+            .status()
+            .expect("run sh");
+        assert!(status.success(), "install_test.sh failed");
+    }
 }
