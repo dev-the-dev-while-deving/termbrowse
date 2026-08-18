@@ -22,7 +22,7 @@ mod tui;
 mod update;
 mod urlutil;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use layout::layout_document;
 use session::load_page;
@@ -31,7 +31,7 @@ use urlutil::ensure_http_url;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "termbrowse",
+    name = "browse",
     about = "Terminal web session — structure-first, 256-color identity, no Chrome",
     version
 )]
@@ -65,6 +65,8 @@ enum Commands {
         #[arg(long, default_value_t = 100)]
         width: u16,
     },
+    /// Replace this binary with the latest GitHub Release
+    Update,
 }
 
 #[tokio::main]
@@ -94,6 +96,18 @@ async fn main() -> Result<()> {
             let snap = snapshot(&page.doc, Some(&lay));
             if let Some(layout) = snap.layout {
                 print!("{}", layout.text);
+            }
+        }
+        Some(Commands::Update) => {
+            let dest = std::env::current_exe().context("current exe")?;
+            let dest = dest.canonicalize().unwrap_or(dest);
+            match update::run_update(env!("CARGO_PKG_VERSION"), &dest).await? {
+                update::UpdateOutcome::AlreadyLatest { version } => {
+                    println!("browse is up to date ({version})");
+                }
+                update::UpdateOutcome::Updated { from, to } => {
+                    println!("updated {from} → {to}");
+                }
             }
         }
         None => match cli.url {

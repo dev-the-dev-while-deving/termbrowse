@@ -285,6 +285,66 @@ pub fn pick_checksums_url(release: &Release) -> Result<&str> {
         .context("no SHA256SUMS asset")
 }
 
+pub fn detect_target() -> Result<String> {
+    let os = Command::new("uname").arg("-s").output().context("uname -s")?;
+    let arch = Command::new("uname").arg("-m").output().context("uname -m")?;
+    if !os.status.success() || !arch.status.success() {
+        bail!("uname failed");
+    }
+    map_target(
+        std::str::from_utf8(&os.stdout)?.trim(),
+        std::str::from_utf8(&arch.stdout)?.trim(),
+    )
+}
+
+pub async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String> {
+    let resp = client.get(url).send().await.with_context(|| url.to_string())?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        bail!("no release found; tag a version (vX.Y.Z) first");
+    }
+    if !resp.status().is_success() {
+        bail!("download failed: {} {url}", resp.status());
+    }
+    Ok(resp.text().await?)
+}
+
+pub async fn fetch_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
+    let resp = client.get(url).send().await.with_context(|| url.to_string())?;
+    if !resp.status().is_success() {
+        bail!("download failed: {} {url}", resp.status());
+    }
+    Ok(resp.bytes().await?.to_vec())
+}
+
+pub async fn run_update(current: &str, dest: &Path) -> Result<UpdateOutcome> {
+    let ua = format!("browse/{}", strip_v(current));
+    let client = reqwest::Client::builder()
+        .user_agent(&ua)
+        .build()
+        .context("http client")?;
+    let json = fetch_text(&client, &latest_api_url()).await?;
+    let release = parse_release_json(&json)?;
+    if !is_newer(&release.version, current) {
+        return Ok(UpdateOutcome::AlreadyLatest {
+            version: strip_v(current).to_string(),
+        });
+    }
+    let asset = pick_asset(&release, &detect_target()?)?;
+    let sums_url = pick_checksums_url(&release)?;
+    let sums = fetch_text(&client, sums_url).await?;
+    let expected = parse_sha256sums(&sums)
+        .get(&asset.name)
+        .cloned()
+        .with_context(|| format!("no checksum for {}", asset.name))?;
+    let tarball = fetch_bytes(&client, &asset.url).await?;
+    verify_sha256(&tarball, &expected)?;
+    install_tarball(&tarball, dest)?;
+    Ok(UpdateOutcome::Updated {
+        from: strip_v(current).to_string(),
+        to: release.version,
+    })
+}
+
 pub fn run_update_with(
     fetcher: &dyn Fetcher,
     current: &str,
@@ -318,6 +378,15 @@ pub fn run_update_with(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn detect_target_matches_host() {
+        let t = detect_target().expect("this CI/dev host must be a supported target");
+        assert!(
+            t.ends_with("apple-darwin") || t.ends_with("linux-musl"),
+            "{t}"
+        );
+    }
 
     #[test]
     fn maps_supported_targets() {
