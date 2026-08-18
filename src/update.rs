@@ -68,6 +68,26 @@ pub fn notice_if_newer(cache: &CheckCache, current: &str) -> Option<String> {
     }
 }
 
+pub fn cache_after_check(prev: CheckCache, now: u64, latest: Option<String>) -> CheckCache {
+    CheckCache {
+        checked_at: now,
+        latest: latest.or(prev.latest),
+    }
+}
+
+pub async fn refresh_latest_cache() -> Result<CheckCache> {
+    let prev = load_cache();
+    let ua = format!("browse/{}", env!("CARGO_PKG_VERSION"));
+    let client = reqwest::Client::builder().user_agent(&ua).build()?;
+    let latest = match fetch_text(&client, &latest_api_url()).await {
+        Ok(json) => parse_release_json(&json).ok().map(|r| r.version),
+        Err(_) => None,
+    };
+    let next = cache_after_check(prev, now_secs(), latest);
+    let _ = save_cache(&next);
+    Ok(next)
+}
+
 pub fn map_target(os: &str, arch: &str) -> Result<String> {
     let t = match (os, arch) {
         ("Darwin", "arm64") => "aarch64-apple-darwin",
@@ -711,5 +731,25 @@ mod tests {
         assert!(err.contains("checksum mismatch"), "{err}");
         assert_eq!(std::fs::read(&dest).unwrap(), b"old");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_check_keeps_previous_latest() {
+        let prev = CheckCache {
+            checked_at: 10,
+            latest: Some("0.2.0".into()),
+        };
+        let next = cache_after_check(prev, 99, None);
+        assert_eq!(next.checked_at, 99);
+        assert_eq!(next.latest.as_deref(), Some("0.2.0"));
+        let next_ok = cache_after_check(
+            CheckCache {
+                checked_at: 10,
+                latest: Some("0.1.0".into()),
+            },
+            99,
+            Some("0.3.0".into()),
+        );
+        assert_eq!(next_ok.latest.as_deref(), Some("0.3.0"));
     }
 }
