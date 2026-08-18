@@ -761,4 +761,30 @@ mod tests {
             .expect("run sh");
         assert!(status.success(), "install_test.sh failed");
     }
+
+    #[test]
+    fn release_workflow_covers_four_targets() {
+        let yml = std::fs::read_to_string(".github/workflows/release.yml")
+            .expect("release.yml");
+        for t in [
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "x86_64-unknown-linux-musl",
+            "aarch64-unknown-linux-musl",
+        ] {
+            assert!(yml.contains(t), "missing target {t}");
+        }
+        assert!(yml.contains("SHA256SUMS"), "missing SHA256SUMS");
+        assert!(yml.contains("v*.*.*") || yml.contains("v*.*.*"), "tag trigger");
+        assert!(yml.contains("browse-"), "asset name prefix");
+    }
+
+    #[test]
+    fn readme_has_curl_and_browse() {
+        let md = std::fs::read_to_string("README.md").unwrap();
+        assert!(md.contains("install.sh"), "missing install.sh");
+        assert!(md.contains("curl -fsSL"), "missing curl one-liner");
+        assert!(md.contains("browse update"), "missing browse update");
+        assert!(md.contains("GitHub"), "mention GitHub check");
+    }
 }
