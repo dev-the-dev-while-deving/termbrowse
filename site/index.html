@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>browse — stay in the terminal for the useful web</title>
+  <meta name="description" content="termbrowse is a structure-first terminal web session. Search, open, read, save. No browser engine. No page JS." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="site.css" />
+</head>
+<body>
+  <div class="wrap">
+    <div class="term">
+      <div class="titlebar">
+        <span class="dots">● ● ●</span>
+        <span class="name">browse</span>
+        <span>— termbrowse v0.1</span>
+        <span class="host">tty://web</span>
+      </div>
+      <nav>
+        <a href="index.html" aria-current="page">home</a>
+        <a href="mission.html">mission</a>
+        <a href="install.html">install</a>
+        <a href="keys.html">keys</a>
+        <a href="future.html">future</a>
+      </nav>
+      <main>
+<pre class="ascii">
+ ██████╗ ██████╗  ██████╗ ██╗    ██╗███████╗███████╗
+ ██╔══██╗██╔══██╗██╔═══██╗██║    ██║██╔════╝██╔════╝
+ ██████╔╝██████╔╝██║   ██║██║ █╗ ██║███████╗█████╗
+ ██╔══██╗██╔══██╗██║   ██║██║███╗██║╚════██║██╔══╝
+ ██████╔╝██║  ██║╚██████╔╝╚███╔███╔╝███████║███████╗
+ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝  ╚══╝╚══╝ ╚══════╝╚══════╝
+</pre>
+        <p class="tag">a terminal web session · structure first · <em>no Chrome</em><span class="cursor"></span></p>
+
+        <h1>// what this is</h1>
+        <p>Search, open, read, and save the useful web without leaving the shell. HTML becomes a structured document, then a 256-color layout that reflows with your terminal. Sites keep a little identity. No page JavaScript. No browser engine.</p>
+
+        <p class="dim">URL → fetch → roles + identity → layout(width) → terminal</p>
+
+        <h2>// get it</h2>
+        <div class="cmd">
+          <button class="copy" type="button" data-copy="curl -fsSL https://raw.githubusercontent.com/dev-the-dev-while-deving/termbrowse/from-scratch/install.sh | sh">copy</button>
+          <span class="prompt">$ </span>curl -fsSL https://raw.githubusercontent.com/dev-the-dev-while-deving/termbrowse/from-scratch/install.sh | sh
+        </div>
+        <div class="cmd">
+          <button class="copy" type="button" data-copy="browse">copy</button>
+          <span class="prompt">$ </span>browse
+        </div>
+
+        <div class="grid">
+          <div class="card">
+            <strong>fast</strong>
+            <p>One binary. Zero Chromium. Start Page is local. Docs feel instant.</p>
+          </div>
+          <div class="card">
+            <strong>private</strong>
+            <p>No arbitrary site JS. Bookmarks stay on disk. No telemetry by default.</p>
+          </div>
+          <div class="card">
+            <strong>focused</strong>
+            <p>DuckDuckGo only. Keyboard session. Chrome for apps — browse for reading.</p>
+          </div>
+        </div>
+
+        <p class="dim">macOS (Apple Silicon + Intel) and Linux (x86_64 + ARM). Then <a href="install.html">browse update</a> when we ship.</p>
+      </main>
+      <footer>
+        <span>not Chrome · not a CAPTCHA solver · not the whole web</span>
+        <a href="https://github.com/dev-the-dev-while-deving/termbrowse">github</a>
+      </footer>
+    </div>
+  </div>
+  <script src="site.js"></script>
+</body>
+</html>

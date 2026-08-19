@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>install — browse</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="site.css" />
+</head>
+<body>
+  <div class="wrap">
+    <div class="term">
+      <div class="titlebar">
+        <span class="dots">● ● ●</span>
+        <span class="name">browse</span>
+        <span>/ install</span>
+        <span class="host">tty://web</span>
+      </div>
+      <nav>
+        <a href="index.html">home</a>
+        <a href="mission.html">mission</a>
+        <a href="install.html" aria-current="page">install</a>
+        <a href="keys.html">keys</a>
+        <a href="future.html">future</a>
+      </nav>
+      <main>
+        <h1>// install</h1>
+        <p>One curl. No Rust. macOS (Apple Silicon or Intel) and Linux (x86_64 or ARM). Writes <span class="ok">~/.local/bin/browse</span>.</p>
+
+        <h2>01  fetch the binary</h2>
+        <div class="cmd">
+          <button class="copy" type="button" data-copy="curl -fsSL https://raw.githubusercontent.com/dev-the-dev-while-deving/termbrowse/from-scratch/install.sh | sh">copy</button>
+          <span class="prompt">$ </span>curl -fsSL https://raw.githubusercontent.com/dev-the-dev-while-deving/termbrowse/from-scratch/install.sh | sh
+        </div>
+
+        <h2>02  if the shell cannot find it</h2>
+        <div class="cmd">
+          <button class="copy" type="button" data-copy="export PATH=&quot;$HOME/.local/bin:$PATH&quot;">copy</button>
+          <span class="prompt">$ </span>export PATH="$HOME/.local/bin:$PATH"
+        </div>
+
+        <h2>03  use it</h2>
+        <div class="cmd">
+          <button class="copy" type="button" data-copy="browse">copy</button>
+          <span class="prompt">$ </span>browse
+        </div>
+        <div class="cmd">
+          <button class="copy" type="button" data-copy="browse https://example.com">copy</button>
+          <span class="prompt">$ </span>browse https://example.com
+        </div>
+        <div class="cmd">
+          <button class="copy" type="button" data-copy="browse update">copy</button>
+          <span class="prompt">$ </span>browse update
+        </div>
+
+        <h2>// from source</h2>
+        <div class="cmd">
+          <button class="copy" type="button" data-copy="cargo run --release">copy</button>
+          <span class="prompt">$ </span>cargo run --release
+        </div>
+
+        <div class="box">
+          The binary is unsigned. <b>browse</b> checks GitHub at most once per day for a newer version and never sends page or search data.<br />
+          Curl install needs a published GitHub Release (<span class="ok">v0.1.0</span> tag). Until then, use cargo from the repo.
+        </div>
+      </main>
+      <footer>
+        <span>re-run the curl or type browse update</span>
+        <a href="https://github.com/dev-the-dev-while-deving/termbrowse">source</a>
+      </footer>
+    </div>
+  </div>
+  <script src="site.js"></script>
+</body>
+</html>

@@ -8,6 +8,17 @@ HTML becomes a structured document, then a **256-color** ratatui layout that ref
 URL → fetch → roles + identity → layout(width) → terminal
 ```
 
+## Site
+
+ASCII landing (home / mission / install / keys / future) lives in `site/`.
+
+Live: https://browse-ascii-devgymseveryday-3168s-projects.vercel.app  
+(If Vercel asks you to log in, turn off **Deployment Protection** on the `browse-ascii` project.)
+
+```bash
+python3 -m http.server 8765 --directory site
+```
+
 ## Install
 
 macOS (Apple Silicon or Intel) and Linux (x86_64 or ARM):
