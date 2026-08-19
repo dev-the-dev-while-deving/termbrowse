@@ -12,8 +12,7 @@ URL → fetch → roles + identity → layout(width) → terminal
 
 ASCII landing (home / mission / install / keys / future) lives in `site/`.
 
-Live: https://browse-ascii-devgymseveryday-3168s-projects.vercel.app  
-(If Vercel asks you to log in, turn off **Deployment Protection** on the `browse-ascii` project.)
+Live: https://dev-the-dev-while-deving.github.io/termbrowse/
 
 ```bash
 python3 -m http.server 8765 --directory site
