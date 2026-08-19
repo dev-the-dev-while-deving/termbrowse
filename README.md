@@ -23,7 +23,7 @@ python3 -m http.server 8765 --directory site
 macOS (Apple Silicon or Intel) and Linux (x86_64 or ARM):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dev-the-dev-while-deving/termbrowse/from-scratch/install.sh | sh
+curl -fsSL https://dev-the-dev-while-deving.github.io/termbrowse/i | sh
 ```
 
 That puts `browse` in `~/.local/bin`. If your shell cannot find it:

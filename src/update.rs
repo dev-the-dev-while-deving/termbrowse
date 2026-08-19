@@ -782,7 +782,7 @@ mod tests {
     #[test]
     fn readme_has_curl_and_browse() {
         let md = std::fs::read_to_string("README.md").unwrap();
-        assert!(md.contains("install.sh"), "missing install.sh");
+        assert!(md.contains("github.io/termbrowse/i"), "missing short install URL");
         assert!(md.contains("curl -fsSL"), "missing curl one-liner");
         assert!(md.contains("browse update"), "missing browse update");
         assert!(md.contains("GitHub"), "mention GitHub check");
